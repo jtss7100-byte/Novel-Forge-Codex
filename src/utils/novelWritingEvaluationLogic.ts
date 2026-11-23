@@ -1,14 +1,93 @@
 import type { PromptProfile, WritingContextBundle, WritingResult } from '../types/aiEngine';
 import type { BlindAbPairItem } from '../types/literaryRewriting';
-import type { EvaluationArm, EvaluationBlindPair, EvaluationCase, EvaluationManifest, EvaluationProfileTrace, EvaluationRating, EvaluationScenarioId } from '../types/novelWritingEvaluation';
+import type { EvaluationAdherence, EvaluationArm, EvaluationBlindPair, EvaluationCase, EvaluationManifest, EvaluationProfileTrace, EvaluationRating, EvaluationScenarioId } from '../types/novelWritingEvaluation';
 import { EVALUATION_DIMENSIONS, EVALUATION_INTEGRITY_CODES } from '../types/novelWritingEvaluation';
 import { assembleNovelWriterPromptInOrder, sanitizeEmbeddedDataAgainstCommandInjection } from './aiEngineLogic';
 import { extractStylePromptMetadata } from './authorStyleLogic';
 import { collectVoiceEvidence, extractVoiceExcerpts, readApprovedVoiceSources } from './characterVoiceLogic';
 import { randomizeBlindSides, resolveBlindChoiceToPreference, summarizeBlindAbRatings } from './literaryEvaluationHarness';
 import { computeManuscriptContentHash } from './manuscriptIntegrity';
-import { EVALUATION_DATASET_VERSION, toActivePrompt, type EvaluationFixture } from './novelWritingEvaluationBenchmark';
+import { EVALUATION_DATASET_VERSION, evaluationStyleInstruction, evaluationVoiceInstructions, toActivePrompt, type EvaluationFixture } from './novelWritingEvaluationBenchmark';
 import type { EvaluationIntegrityCode } from '../types/novelWritingEvaluation';
+import { buildLiteraryQualityEvaluationPrompt } from './literaryQualityLogic';
+
+export const COMMON_QUALITY_RUBRIC = 'common-q1-q8-v1';
+const ADHERENCE_RUBRIC = 'synthetic-adherence-v1';
+
+export function commonLiteraryContext(context: WritingContextBundle): WritingContextBundle {
+  const styleVoice = new Set(context.activePrompts.filter((profile) =>
+    profile.promptType === 'PROJECT_STYLE_PROFILE' ||
+    (profile.promptType === 'CHARACTER_DIALOGUE_RULES' && (profile.targetCharacterId || profile.profileId.startsWith('voice_'))))
+    .map((profile) => profile.profileId));
+  const references = (context.retrievedMemoryChunks ?? []).filter((item) =>
+    item.projectId === context.projectId && item.canonStatus === 'CANON' && item.verifiedForWriting && item.freshnessStatus === 'FRESH');
+  if (!references.length || references.length !== context.retrievedMemoryChunks?.length) throw new Error('EVALUATOR_CONTEXT_MISMATCH');
+  return {
+    ...context, activePrompts: context.activePrompts.filter((item) => !styleVoice.has(item.profileId)),
+    referencedSources: context.referencedSources.filter((item) => !styleVoice.has(item.entityId)),
+    previousEpisodeSummary: [
+      context.previousEpisodeSummary, '검증된 장기 기억 근거',
+      ...references.map((item) => `${item.chunkId} · ${item.sourceEntityId} · ${item.sourceRevisionId} · ${item.sourceStartOffset}–${item.sourceEndOffset}\n${item.originalText}`),
+    ].join('\n'),
+  };
+}
+
+export function qualityTemplateFingerprint(context: WritingContextBundle, modelId: string, system: string, contents: string) {
+  const block = /<reference_data type="manuscript_to_evaluate"([^>]*?) utf16_length="\d+">\n[\s\S]*?\n<\/reference_data>/g;
+  if ([...contents.matchAll(block)].length !== 1) throw new Error('EVALUATOR_CONTEXT_MISMATCH');
+  return evaluationFingerprint([COMMON_QUALITY_RUBRIC, modelId, system,
+    contents.replace(block, '<reference_data type="manuscript_to_evaluate"$1>__MANUSCRIPT__</reference_data>'),
+    context.canonCharacters, context.canonWorldbuilding, context.retrievedMemoryChunks,
+    context.plotOutline, context.scenePerspective, context.sceneCharacterIds,
+  ]);
+}
+
+export function pinCommonQuality(context: WritingContextBundle, modelId: string) {
+  const common = commonLiteraryContext(context);
+  const prompt = buildLiteraryQualityEvaluationPrompt({ ownerId: common.ownerId ?? '', context: common, manuscript: '[평가 후보 원고]' });
+  return {
+    context: common,
+    fingerprint: qualityTemplateFingerprint(common, modelId, prompt.systemInstruction, prompt.promptContent),
+  };
+}
+
+export function calculateEvaluationAdherence(fixture: EvaluationFixture, text: string, dry: boolean) {
+  const targets = prepareEvaluationArm(fixture, 'STYLE_AND_VOICE');
+  const paragraphs = text.split(/\n\s*\n/).filter(Boolean);
+  const sensory = /빛|소리|차가|서늘|냄새|젖|온기|축축|울|따뜻|따스/;
+  const actions = /살피|멈췄|멈추|들었|잡|쥐|내밀|접|돌아|돌렸|떨|내려|건넸|밀었|폈|보았|건너/i;
+  const transitions = paragraphs.slice(1).map((paragraph, index) =>
+    (sensory.test(paragraphs[index]) && actions.test(paragraph)) ||
+    (actions.test(paragraphs[index]) && sensory.test(paragraph)));
+  const styleEvidence = [
+    { criterion: '감각 단서가 있는 문단', matched: paragraphs.filter((item) => sensory.test(item)).length, observed: paragraphs.length },
+    { criterion: '행동 변화가 있는 문단', matched: paragraphs.filter((item) => actions.test(item)).length, observed: paragraphs.length },
+    { criterion: '대사 앞 문단 구분', matched: (text.match(/\n\s*\n[“"]/g) ?? []).length, observed: paragraphs.length > 1 ? paragraphs.length - 1 : 0 },
+    { criterion: '인접 문단의 감각·행동 전환', matched: transitions.filter(Boolean).length, observed: transitions.length },
+  ];
+  if (!fixture.style.content.includes(evaluationStyleInstruction)) throw new Error('ADHERENCE_RUBRIC_MISMATCH');
+  const excerpts = extractVoiceExcerpts(text, fixture.context.canonCharacters);
+  const voiceEvidence = targets.voice.map((target) => {
+    const characterId = target.targetCharacterId;
+    const personIndex = fixture.context.canonCharacters.findIndex((entry) => entry.id === characterId);
+    const profile = fixture.voice.find((entry) => entry.id === target.profileId);
+    if (!characterId || !profile?.content.includes(evaluationVoiceInstructions[personIndex])) throw new Error('ADHERENCE_RUBRIC_MISMATCH');
+    const lines = collectVoiceEvidence(excerpts, characterId);
+    const matches = [/습니다|습니까|십시오|대장님/, /[봐해가와어네아][.!?]?$|[해봐가와어]라[.!?]?$/, /종.{0,8}그림자|쇠종/][personIndex];
+    return { criterion: evaluationVoiceInstructions[personIndex], matched: lines.filter((line) => matches.test(line.text)).length, observed: lines.length, characterId };
+  });
+  const measure = (profiles: EvaluationProfileTrace[], evidence: EvaluationAdherence['evidence'], minimum: number): EvaluationAdherence => {
+    const applicable = evidence.filter((item) => item.observed > 0);
+    const observed = applicable.reduce((sum, item) => sum + item.observed, 0);
+    return {
+      score: observed >= minimum ? Math.round(100 * applicable.reduce((sum, item) => sum + item.matched / item.observed, 0) / applicable.length) : null,
+      confidence: observed >= minimum * 2 ? 'MEDIUM' : 'LOW',
+      status: observed < minimum ? 'INSUFFICIENT_EVIDENCE' : dry ? 'FIXTURE' : 'HEURISTIC',
+      rubricVersion: ADHERENCE_RUBRIC, targets: profiles, evidence,
+    };
+  };
+  return { authorStyleAdherence: measure(targets.style, styleEvidence, 2), characterVoiceAdherence: measure(targets.voice, voiceEvidence, 2) };
+}
 
 export function evaluationFingerprint(value: unknown): string {
   return computeManuscriptContentHash(JSON.stringify(value, (_key, item: unknown) => {
@@ -76,14 +155,14 @@ export function assertControlledPrompts(baseline: string, treatment: string, bas
 }
 
 export function buildEvaluationManifest(fixture: EvaluationFixture, controlledPrompt: string, modelId: string,
-  perspective: EvaluationManifest['perspective'], system: string, modelConfig: unknown, qualityCriteria: unknown): EvaluationManifest {
+  perspective: EvaluationManifest['perspective'], system: string, modelConfig: unknown, qualityCriteriaFingerprint: string): EvaluationManifest {
   const { context, plan } = fixture;
   return {
     modelId, datasetVersion: EVALUATION_DATASET_VERSION, writingPlanFingerprint: evaluationFingerprint(plan),
     canonFingerprint: evaluationFingerprint([context.canonCharacters, context.canonWorldbuilding, context.approvedExceptions]),
     ragFingerprint: evaluationFingerprint(context.retrievedMemoryChunks),
-    controlsFingerprint: evaluationFingerprint([system, controlledPrompt, modelConfig]),
-    qualityCriteriaFingerprint: evaluationFingerprint(qualityCriteria),
+    controlsFingerprint: evaluationFingerprint([system, controlledPrompt, modelConfig, qualityCriteriaFingerprint]),
+    qualityCriteriaFingerprint, qualityRubricVersion: COMMON_QUALITY_RUBRIC,
     perspective, characters: [...(context.sceneCharacterIds ?? [])], targetLength: plan.scenes[0].targetCharCount,
   };
 }
@@ -137,8 +216,11 @@ export function summarizeWritingEvaluation(cases: EvaluationCase[], pairs: Hidde
     const choice = byPair.get(pair.pairId)?.choice;
     return { preference: resolveBlindChoiceToPreference({ choice: choice && choice !== 'DEFER' ? choice : 'NOT_RATED', hiddenSideAssignment: assignment }) };
   }));
+  const dimensionRatedCount = pairs.filter(({ pair }) =>
+    Object.values(byPair.get(pair.pairId)?.dimensions ?? {}).some((choice) => choice !== 'DEFER')).length;
   const deltas = EVALUATION_DIMENSIONS.map((dimension) => {
     const values = comparable.flatMap(({ baseline, treatment }) => {
+      if (baseline.qualityStatus === 'FAILED' || treatment.qualityStatus === 'FAILED') return [];
       const a = baseline.scores[dimension], b = treatment.scores[dimension];
       return a == null || b == null ? [] : [b - a];
     }).sort((a, b) => a - b);
@@ -151,10 +233,18 @@ export function summarizeWritingEvaluation(cases: EvaluationCase[], pairs: Hidde
   });
   const counts = (arm: 'baseline' | 'treatment') => Object.fromEntries(EVALUATION_INTEGRITY_CODES.map((code) =>
     [code, cases.filter((entry) => entry[arm].issues.includes(code)).length]));
+  const adherence = (key: 'authorStyleAdherence' | 'characterVoiceAdherence') => {
+    const values = comparable.flatMap(({ baseline, treatment }) => {
+      const a = baseline[key]?.score, b = treatment[key]?.score;
+      return a == null || b == null ? [] : [b - a];
+    });
+    return { samples: values.length, meanDelta: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null };
+  };
   return {
     total: cases.length, comparable: comparable.length, excluded: cases.length - comparable.length,
-    human: { ...human, status: human.ratedCount ? 'RATED' as const : 'NOT_RATED' as const },
+    human: { ...human, dimensionRatedCount, status: human.ratedCount || dimensionRatedCount ? 'RATED' as const : 'NOT_RATED' as const },
     deltas, integrity: { baseline: counts('baseline'), treatment: counts('treatment') },
+    authorStyle: adherence('authorStyleAdherence'), characterVoice: adherence('characterVoiceAdherence'),
   };
 }
 

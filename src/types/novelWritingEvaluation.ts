@@ -2,6 +2,8 @@ import type { LiteraryQualityDimensionId } from './literaryQuality';
 import type { NarrativePerspective } from './foundation';
 
 export type EvaluationMode = 'DRY_RUN_FIXTURE' | 'LIVE_GEMINI' | 'DISABLED';
+export const EVALUATION_SESSION_STATUSES = ['CREATED', 'RUNNING', 'AWAITING_HUMAN_REVIEW', 'FINALIZED', 'CANCELLED', 'INTERRUPTED', 'FAILED'] as const;
+export type EvaluationSessionStatus = typeof EVALUATION_SESSION_STATUSES[number];
 export const EVALUATION_ARMS = ['BASELINE', 'STYLE_ONLY', 'VOICE_ONLY', 'STYLE_AND_VOICE'] as const;
 export type EvaluationArm = typeof EVALUATION_ARMS[number];
 export type EvaluationTreatment = Exclude<EvaluationArm, 'BASELINE'>;
@@ -54,9 +56,19 @@ export interface EvaluationManifest {
   ragFingerprint: string;
   controlsFingerprint: string;
   qualityCriteriaFingerprint: string;
+  qualityRubricVersion: string;
   perspective: NarrativePerspective;
   characters: string[];
   targetLength: number;
+}
+
+export interface EvaluationAdherence {
+  score: number | null;
+  confidence: 'LOW' | 'MEDIUM';
+  status: 'FIXTURE' | 'HEURISTIC' | 'INSUFFICIENT_EVIDENCE';
+  rubricVersion: string;
+  targets: EvaluationProfileTrace[];
+  evidence: { criterion: string; matched: number; observed: number; characterId?: string }[];
 }
 
 export const EVALUATION_INTEGRITY_CODES = [
@@ -74,6 +86,10 @@ export interface EvaluationCandidate {
   voice: EvaluationProfileTrace[];
   promptHash?: string;
   observedModelVersion?: string;
+  observedQualityModelVersion?: string;
+  qualityFailure?: string;
+  authorStyleAdherence?: EvaluationAdherence;
+  characterVoiceAdherence?: EvaluationAdherence;
 }
 
 export interface EvaluationCase {
@@ -86,6 +102,23 @@ export interface EvaluationCase {
   comparable: boolean;
   exclusionReasons: string[];
   lengthDifferencePercent: number | null;
+  baselineText?: string;
+  treatmentText?: string;
+}
+
+export interface EvaluationSessionHeader {
+  operationId: string;
+  status: EvaluationSessionStatus;
+  version: number;
+  datasetVersion: string;
+  modelId: string;
+  mode: EvaluationSettings['mode'];
+  treatment: EvaluationTreatment;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  humanRatingStatus: 'NOT_RATED' | 'DRAFT' | 'RATED';
+  reason?: string;
 }
 
 export interface EvaluationBlindPair {

@@ -8,6 +8,14 @@ import { KOREAN_WEB_NOVEL_BENCHMARKS } from './literaryQualityBenchmark';
 import { LITERARY_REWRITING_BENCHMARKS } from './literaryRewritingBenchmark';
 import { computeManuscriptContentHash } from './manuscriptIntegrity';
 
+// These rule strings are the approved fixture targets used by both generation and adherence.
+export const evaluationStyleInstruction = '감각 단서와 행동의 변화를 번갈아 놓는다. 대답 앞에 필요한 여백만 두고 원문을 복제하지 않는다.';
+export const evaluationVoiceInstructions = [
+  '상급자를 대장님으로 부르고 존댓말로 확인한다.',
+  '친숙한 부하에게 짧은 해체로 알린다.',
+  '낯선 상황에는 오래된 종에 빗대어 말한다.',
+];
+
 export const EVALUATION_OWNER_ID = 'novel_writer_evaluation';
 export const EVALUATION_DATASET_VERSION = 'synthetic-nw-v1';
 const createdAt = '2026-11-23T00:00:00.000Z';
@@ -156,7 +164,7 @@ export function buildEvaluationFixture(scenarioId: EvaluationScenarioId, modelId
   const styleSample = LITERARY_REWRITING_BENCHMARKS[7].manuscript;
   const style = approvedProfile(`${projectId}_style`, 'PROJECT_STYLE_PROFILE', '회백 성채의 문체', [
     '작가 승인 문체 지침. 확정 CANON과 Master Writing Rules 및 장면 시점이 우선이다.',
-    '감각 단서와 행동의 변화를 번갈아 놓는다. 대답 앞에 필요한 여백만 두고 원문을 복제하지 않는다.',
+    evaluationStyleInstruction,
     `<!-- STYLE_DNA_META sourceHash=${computeManuscriptContentHash(styleSample)} approvedAt=${createdAt} -->`,
   ].join('\n'));
   const voiceLines = [
@@ -167,13 +175,8 @@ export function buildEvaluationFixture(scenarioId: EvaluationScenarioId, modelId
   const voice = cast.map((person, index) => {
     const text = voiceLines[index].map((line) => `“${line}” ${person.name}이 말했다.`).join('\n');
     const candidate = analyzeVoiceSample({ ownerId, projectId, characterId: person.id, text, cast });
-    const rules = [
-      '상급자를 대장님으로 부르고 존댓말로 확인한다.',
-      '친숙한 부하에게 짧은 해체로 알린다.',
-      '낯선 상황에는 오래된 종에 빗대어 말한다.',
-    ];
     return approvedProfile(voiceProfileId(person.id), 'CHARACTER_DIALOGUE_RULES', `${person.name} 승인 화법`,
-      buildApprovedVoiceContent(candidate, [rules[index]]), person.id);
+      buildApprovedVoiceContent(candidate, [evaluationVoiceInstructions[index]]), person.id);
   });
   const context: WritingContextBundle = {
     ownerId, projectId, episodeId, sceneCharacterIds: characterIds, projectTitle: '회백 성채', projectGenre: '한국 판타지',

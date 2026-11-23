@@ -22,7 +22,8 @@ import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewChar
 import { resolveVoicePromptContext } from './voicePromptContext.ts';
 import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinuityDecision, saveVoiceDecisionRequest } from './voiceContinuityDecisions.ts';
 import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
-import { cancelEvaluationSession, evaluationCancelInput, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
+import { cancelEvaluationSession, evaluationCancelInput, evaluationOperationId, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
+import { NovelWritingEvaluationSessions } from './novelWritingEvaluationSessions';
 import {
   executeServerManuscriptExtraction,
   saveVerifiedExtractionProposalsOnServer,
@@ -549,20 +550,38 @@ export function createApiRouter(): express.Router {
     }
     try {
       const action = req.path.split('/').filter(Boolean).at(-1);
-      if (req.method === 'GET') {
+      if (req.method === 'GET' && action === 'settings') {
         res.json(getEvaluationSettings(owner.isAuthenticatedCloud));
+        return;
+      }
+      const cloud = owner.isAuthenticatedCloud ? new NovelWritingEvaluationSessions(getVoiceFirestore()) : undefined;
+      if (req.method === 'GET') {
+        if (!cloud) throw new EvaluationRequestError(401, 'EVALUATION_AUTH_REQUIRED');
+        if (action === 'sessions') {
+          const after = req.query.after === undefined ? undefined : evaluationOperationId.safeParse(req.query.after);
+          if (after && !after.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_OPERATION');
+          res.json(await cloud.list(owner.ownerId, after?.data));
+        } else {
+          const id = evaluationOperationId.safeParse(req.params.id);
+          if (!id.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_OPERATION');
+          res.json(await cloud.get(owner.ownerId, id.data));
+        }
       } else if (action === 'run') {
         const input = evaluationRunInput.safeParse(req.body);
         if (!input.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_SETTINGS');
-        res.json(await startEvaluationSession(owner.ownerId, owner.isAuthenticatedCloud, input.data));
+        res.json(cloud ? await cloud.start(owner.ownerId, input.data) : await startEvaluationSession(owner.ownerId, false, input.data));
       } else if (action === 'cancel') {
         const input = evaluationCancelInput.safeParse(req.body);
         if (!input.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_OPERATION');
-        res.json(cancelEvaluationSession(owner.ownerId, input.data.operationId));
+        res.json(cloud ? await cloud.cancel(owner.ownerId, input.data.operationId) : cancelEvaluationSession(owner.ownerId, input.data.operationId));
       } else {
         const input = evaluationReviewInput.safeParse(req.body);
         if (!input.success) throw new EvaluationRequestError(400, 'INVALID_BLIND_RATING');
-        res.json(finalizeEvaluationSession(owner.ownerId, input.data.operationId, input.data.ratings));
+        if (cloud) res.json(await cloud.review(owner.ownerId, input.data));
+        else {
+          if (!input.data.finalize) throw new EvaluationRequestError(400, 'LOCAL_EVALUATION_DRAFT_NOT_PERSISTED');
+          res.json(finalizeEvaluationSession(owner.ownerId, input.data.operationId, input.data.ratings));
+        }
       }
     } catch (error) {
       res.status(error instanceof EvaluationRequestError ? error.status : 500)
@@ -570,6 +589,7 @@ export function createApiRouter(): express.Router {
     }
   };
   app.get('/api/novel-writing-evaluation/settings', novelEvaluation);
+  app.get(['/api/novel-writing-evaluation/sessions', '/api/novel-writing-evaluation/sessions/:id'], novelEvaluation);
   app.post(['/api/novel-writing-evaluation/run', '/api/novel-writing-evaluation/cancel', '/api/novel-writing-evaluation/review'], novelEvaluation);
 
   app.post(['/api/ai/analyze-character-voice', '/api/ai/review-style-continuity'], async (req, res) => {

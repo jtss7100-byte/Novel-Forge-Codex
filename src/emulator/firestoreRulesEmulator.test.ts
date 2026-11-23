@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { FinishReason, GenerateContentResponse } from '@google/genai';
 import {
   deleteApp as deleteAdminApp,
   getApps as getAdminApps,
@@ -68,6 +70,9 @@ import { analyzeAuthorStyleOnServer } from '../server/authorStyleAnalyzer.ts';
 import { analyzeCharacterVoice, reviewCharacterContinuity } from '../server/characterVoiceAnalyzer.ts';
 import { listVoiceContinuityDecisions, saveVoiceContinuityDecision } from '../server/voiceContinuityDecisions.ts';
 import type { VoiceDecisionCommand } from '../types/voiceContinuityDecision.ts';
+import type { EvaluationSettings } from '../types/novelWritingEvaluation.ts';
+import { NovelWritingEvaluationSessions } from '../server/novelWritingEvaluationSessions.ts';
+import { buildEvaluationFixture, EVALUATION_DATASET_VERSION } from '../utils/novelWritingEvaluationBenchmark.ts';
 import { buildApprovedVoiceContent, voiceProfileId } from '../utils/characterVoiceLogic.ts';
 import { createInitialSeedBundle } from '../utils/seedData.ts';
 import { verifyServerCanonEvidenceForRewrite } from '../server/canonEvidenceGate.ts';
@@ -2860,5 +2865,201 @@ test('Emulator Test 11: Durable Voice Continuity Decision, CAS, Idempotency, Sou
   } finally {
     await firestore.recursiveDelete(firestore.doc(`users/${owner.uid}`));
     await Promise.all([owner.cleanup(), intruder.cleanup(), deleteClientApp(secondApp), handle.cleanup()]);
+  }
+});
+
+test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isolation, Session CAS, Idempotency and Cross-Device Restore', async (t) => {
+  const env = assertRulesEmulatorEnv();
+  const run = `eval_sessions_${Date.now()}`;
+  const password = 'EvaluationTest#1881';
+  const email = (role: string) => `${role}-${run}@novelforge.local`;
+  const createUser = (role: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel: role, email: email(role), password, appName: `client_${role}_${run}`, adminAppName: `admin_${role}_${run}`,
+  });
+  const owner = await createUser('evaluation-owner');
+  const intruder = await createUser('evaluation-intruder');
+  const first = createIsolatedTestFirestoreClient({ ...env, runId: run });
+  const fresh = createIsolatedTestFirestoreClient({ ...env, runId: `${run}_new_worker` });
+  const secondApp = initializeClientApp(owner.app.options, `client_evaluation_second_${run}`);
+  const setup: EvaluationSettings = {
+    operationId: randomUUID(), mode: 'DRY_RUN_FIXTURE', optIn: false, treatment: 'STYLE_AND_VOICE', scenarios: ['NW8'], repeats: 1,
+  };
+  const store = new NovelWritingEvaluationSessions(first.db);
+  const restarted = new NovelWritingEvaluationSessions(fresh.db);
+  const secretPath = `users/${owner.uid}/novelWritingEvaluations/${setup.operationId}`;
+  const keptSources = [
+    ['projects/written', { id: 'written', ownerId: owner.uid, title: 'Original project' }],
+    ['projects/written/episodes/ep1', { id: 'ep1', ownerId: owner.uid, latestRevisionId: 'rev1', content: '보존할 원고' }],
+    ['projects/written/revisions/rev1', { id: 'rev1', ownerId: owner.uid, content: '보존할 원고' }],
+    ['projects/written/worldbuilding/canon', { id: 'canon', ownerId: owner.uid, canonStatus: 'CANON' }],
+    ['projects/written/memoryDocuments/rag', { id: 'rag', ownerId: owner.uid, sourceRevisionId: 'rev1', canonStatus: 'CANON' }],
+  ] as const;
+  try {
+    const auth = getClientAuth(secondApp);
+    connectAuthEmulator(auth, `http://${env.authHost}`, { disableWarnings: true });
+    const firstUser = getClientAuth(owner.app).currentUser;
+    assert.ok(firstUser);
+    const secondUser = (await signInWithEmailAndPassword(auth, email('evaluation-owner'), password)).user;
+    const firstVerified = await getAdminAuth(first.app).verifyIdToken(await firstUser.getIdToken());
+    const secondVerified = await getAdminAuth(fresh.app).verifyIdToken(await secondUser.getIdToken());
+    assert.equal(firstVerified.uid, owner.uid);
+    assert.equal(secondVerified.uid, owner.uid);
+    const secondDb = connectClientFirestoreDb({ app: secondApp, ...env });
+    await Promise.all(keptSources.map(([key, data]) => first.db.doc(`users/${owner.uid}/${key}`).set(data)));
+
+    const initial = await store.start(firstVerified.uid, setup);
+    assert.equal(initial.status, 'AWAITING_HUMAN_REVIEW');
+    assert.equal(initial.pairs.length, 1);
+    await t.test('EV6: the committed Cloud session holds separate case documents and lifecycle events', async () => {
+      const session = (await first.db.doc(secretPath).get()).data();
+      assert.equal(session?.settings.operationId, setup.operationId);
+      assert.equal(session?.ownerId, owner.uid);
+      assert.equal(session?.telemetry.actualCalls, 0);
+      assert.equal((await first.db.collection(`${secretPath}/events`).get()).size, 3);
+      const saved = (await first.db.doc(`${secretPath}/cases/NW8-1`).get()).data();
+      assert.equal(saved?.entry.treatment.authorStyleAdherence.status, 'FIXTURE');
+      assert.equal(saved?.entry.baseline.qualityStatus, 'FIXTURE');
+      assert.ok(saved?.entry.baselineText);
+      assert.ok(saved?.pair.assignment);
+    });
+    await t.test('EV7: a fresh Admin client lists and restores the persisted experiment after a simulated restart', async () => {
+      assert.deepEqual(await restarted.get(secondVerified.uid, setup.operationId), initial);
+      assert.deepEqual((await restarted.list(secondVerified.uid)).entries.map((entry) => entry.operationId), [setup.operationId]);
+      assert.deepEqual(await restarted.start(secondVerified.uid, setup), initial);
+    });
+    await t.test('EV8: a second authenticated device receives the same blind pair and saved draft without the answer', async () => {
+      const chosen = { pairId: initial.pairs[0].pairId, choice: 'A' as const, comment: '다른 기기에서 복원할 메모' };
+      const updated = await store.review(firstVerified.uid, {
+        operationId: setup.operationId, reviewOperationId: randomUUID(), expectedVersion: initial.version, ratings: [chosen], finalize: false,
+      });
+      assert.equal(updated.humanRatingStatus, 'DRAFT');
+      const second = await restarted.get(secondVerified.uid, setup.operationId);
+      assert.deepEqual(second.pairs, initial.pairs);
+      assert.deepEqual(second.reviewDraft, [chosen]);
+      assert.equal(second.report, undefined);
+      assert.deepEqual(Object.keys(second.pairs[0]).sort(), ['goal', 'optionA', 'optionB', 'pairId', 'scenarioId', 'title']);
+      assert.doesNotMatch(JSON.stringify(second), /hiddenSideAssignment|promptHash|baselineSide|profileId/);
+      await assertPermissionDenied(() => getDoc(doc(secondDb, secretPath)), 'owner client cannot read the hidden root');
+      await assertPermissionDenied(() => getDoc(doc(secondDb, `${secretPath}/cases/NW8-1`)), 'owner client cannot read assignment');
+      await assertPermissionDenied(() => getDocs(collection(secondDb, `${secretPath}/reviews`)), 'owner client cannot list review receipts');
+      await assertPermissionDenied(() => updateDoc(doc(secondDb, secretPath), { version: 99 }), 'owner client cannot write evaluation');
+    });
+    await t.test('EV9: another user cannot read or change the original session', async () => {
+      await assert.rejects(restarted.get(intruder.uid, setup.operationId), { status: 404 });
+      await assert.rejects(restarted.cancel(intruder.uid, setup.operationId), { status: 404 });
+      await assert.rejects(restarted.review(intruder.uid, {
+        operationId: setup.operationId, expectedVersion: 4, reviewOperationId: randomUUID(), ratings: [], finalize: true,
+      }), { status: 404 });
+      assert.deepEqual((await restarted.list(intruder.uid)).entries, []);
+      await assertPermissionDenied(() => getDoc(doc(intruder.db, secretPath)), 'other tenant cannot read the root');
+      await assertPermissionDenied(() => setDoc(doc(intruder.db, `${secretPath}/cases/NW8-1`), { ownerId: intruder.uid }), 'other tenant cannot write');
+    });
+    await t.test('EV10: duplicate operation returns the same persisted results and changed settings are rejected', async () => {
+      const before = await store.get(owner.uid, setup.operationId);
+      const both = await Promise.all([store.start(owner.uid, setup), restarted.start(owner.uid, setup)]);
+      assert.deepEqual(both, [before, before]);
+      await assert.rejects(store.start(owner.uid, { ...setup, treatment: 'VOICE_ONLY' }), { code: 'EVALUATION_OPERATION_CONFLICT' });
+      assert.equal((await first.db.collection(`${secretPath}/cases`).get()).size, 1);
+    });
+    const current = await restarted.get(owner.uid, setup.operationId);
+    const commands = ['A', 'B'].map((choice) => ({
+      operationId: setup.operationId, reviewOperationId: randomUUID(), expectedVersion: current.version, finalize: true,
+      ratings: [{ pairId: initial.pairs[0].pairId, choice: choice as 'A' | 'B' }],
+    }));
+    const race = await Promise.allSettled([
+      store.review(firstVerified.uid, commands[0]),
+      restarted.review(secondVerified.uid, commands[1]),
+    ]);
+    const winners = race.flatMap((result, i) => result.status === 'fulfilled' ? [{ result: result.value, command: commands[i] }] : []);
+    assert.equal(winners.length, 1);
+    const [winner] = winners;
+    await t.test('EV11: concurrent finalization uses CAS, reveals one assignment and preserves the winning version', () => {
+      const loser = race.find((result) => result.status === 'rejected');
+      assert.equal(loser?.reason.code, 'VERSION_CONFLICT');
+      assert.equal(winner.result.status, 'FINALIZED');
+      assert.equal(winner.result.version, current.version + 1);
+      assert.equal(winner.result.report?.reveal.length, 1);
+      assert.deepEqual(winner.result.report?.ratings, winner.command.ratings);
+    });
+    await t.test('EV12: finalized reviews and audit records cannot be changed, and replay returns the winner', async () => {
+      assert.deepEqual(await restarted.review(secondVerified.uid, winner.command), winner.result);
+      await assert.rejects(restarted.review(owner.uid, { ...winner.command, ratings: [] }), { code: 'EVALUATION_OPERATION_CONFLICT' });
+      await assert.rejects(restarted.review(owner.uid, {
+        ...winner.command, reviewOperationId: randomUUID(), expectedVersion: winner.result.version, ratings: [],
+      }), { code: 'EVALUATION_REVIEW_FINALIZED' });
+      const audit = (await first.db.doc(`${secretPath}/events/review_${winner.result.version}`).get()).data();
+      assert.deepEqual(audit?.ratings, winner.command.ratings);
+      assert.equal(audit?.previousRatings[0].comment, '다른 기기에서 복원할 메모');
+      await assertPermissionDenied(() => getDoc(doc(secondDb, `${secretPath}/events/review_${winner.result.version}`)), 'audit requires server');
+      await assertPermissionDenied(() => deleteDoc(doc(secondDb, `${secretPath}/events/review_${winner.result.version}`)), 'audit is immutable from clients');
+    });
+    const flags = { RUN_LIVE_GEMINI_EVAL: 'true', GEMINI_API_KEY: 'offline-emulator-transport', NOVEL_WRITING_EVAL_APPROVED_DATASET: EVALUATION_DATASET_VERSION };
+    const previousEnv = Object.fromEntries(Object.keys(flags).map((key) => [key, process.env[key]]));
+    const interruptedSettings = { ...setup, operationId: randomUUID(), mode: 'LIVE_GEMINI' as const, optIn: true, callBudget: 4 };
+    const interruptedPath = `users/${owner.uid}/novelWritingEvaluations/${interruptedSettings.operationId}`;
+    let now = Date.now();
+    let calls = 0;
+    let enterSecond = () => {};
+    let releaseSecond = () => {};
+    const entered = new Promise<void>((resolve) => { enterSecond = resolve; });
+    const released = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const sample = buildEvaluationFixture('NW8', 'offline');
+    const provider = async () => {
+      calls++;
+      if (calls === 2) { enterSecond(); await released; }
+      const outcome = new GenerateContentResponse();
+      outcome.candidates = [{ finishReason: FinishReason.STOP, content: { parts: [{ text: JSON.stringify({
+        manuscript_state: 'DRAFT_READY', manuscript: calls === 1 ? sample.scene.baseline : sample.scene.variant, issues: [], proposals: [],
+      }) }] } }];
+      outcome.usageMetadata = { promptTokenCount: 30, candidatesTokenCount: 20, totalTokenCount: 50 };
+      return outcome;
+    };
+    Object.assign(process.env, flags);
+    try {
+      const worker = new NovelWritingEvaluationSessions(first.db, () => now, provider);
+      const resumed = new NovelWritingEvaluationSessions(fresh.db, () => now, provider);
+      const pending = worker.start(owner.uid, interruptedSettings);
+      try {
+        await Promise.race([entered, pending.then(() => { throw new Error('mock worker did not reach the reserved call'); })]);
+        await t.test('EV13: stale remote call reservation survives restart and is never dispatched again', async () => {
+          assert.equal((await resumed.start(owner.uid, interruptedSettings)).status, 'RUNNING');
+          assert.equal(calls, 2);
+          assert.equal((await first.db.doc(interruptedPath).get()).data()?.pendingCall, 2);
+          now += 121_000;
+          const recovered = await resumed.start(owner.uid, interruptedSettings);
+          assert.equal(recovered.status, 'INTERRUPTED');
+          assert.equal(recovered.reason, 'REMOTE_CALL_OUTCOME_UNKNOWN');
+          assert.equal(calls, 2);
+          assert.equal((await first.db.collection(`${interruptedPath}/events`).get()).docs.filter((event) => event.id.endsWith('_reserved')).length, 2);
+        });
+      } finally { releaseSecond(); await pending; }
+      await t.test('EV14: recovered partial prose and measured usage remain available after completion of the old worker', async () => {
+        const interrupted = await resumed.get(owner.uid, interruptedSettings.operationId);
+        assert.equal(interrupted.status, 'INTERRUPTED');
+        const final = await resumed.review(owner.uid, {
+          operationId: interrupted.operationId, expectedVersion: interrupted.version, reviewOperationId: randomUUID(), ratings: [], finalize: true,
+        });
+        assert.equal(final.report?.telemetry.actualCalls, 2);
+        assert.equal(final.report?.telemetry.measuredTokens, 50);
+        assert.equal(final.report?.telemetry.callsWithoutUsage, 1);
+        assert.equal(final.report?.telemetry.estimatedCostUsd, null);
+        assert.equal(final.report?.cases[0].baselineText, sample.scene.baseline);
+        assert.equal(final.report?.cases[0].treatmentText, undefined);
+        assert.equal(final.report?.summary.comparable, 0);
+        assert.equal(final.report?.summary.human.status, 'NOT_RATED');
+        assert.equal(calls, 2);
+      });
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+
+    await t.test('EV16: original manuscript, Revision, CANON and RAG documents are byte-for-byte unchanged', async () => {
+      for (const [key, data] of keptSources) assert.deepEqual((await first.db.doc(`users/${owner.uid}/${key}`).get()).data(), data);
+    });
+  } finally {
+    await first.db.recursiveDelete(first.db.doc(`users/${owner.uid}`));
+    await Promise.all([owner.cleanup(), intruder.cleanup(), deleteClientApp(secondApp), first.cleanup(), fresh.cleanup()]);
   }
 });

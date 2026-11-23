@@ -535,6 +535,11 @@ service cloud.firestore {
     }
 
     // Projects Collection
+    match /users/{uid}/novelWritingEvaluations/{document=**} {
+      // The authenticated server releases the A/B assignment only after a committed review.
+      allow read, write: if false;
+    }
+
     match /users/{uid}/projects/{projectId} {
       allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && existing().ownerId == request.auth.uid;
       allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
