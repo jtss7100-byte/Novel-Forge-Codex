@@ -103,6 +103,8 @@ import {
   persistApprovedStyleDnaAtomicallyFirestore,
   persistApprovedStyleDnaAtomicallyLocal,
   saveLocalBundles,
+  saveCharacterVoicePromptCore,
+  saveFirestoreCharacterVoicePrompt,
   updateFirestoreChangeProposal,
   updateFirestoreCharacter,
   updateFirestoreForeshadowing,
@@ -137,6 +139,8 @@ import {
   type RagSyncSummary,
 } from './utils/phase4ManagementLogic';
 import type { ChangeProposalApprovalAudit } from './types/changeProposalApproval';
+import type { VoiceSourceReference } from './types/characterVoice';
+import type { VoiceRewriteSelection } from './components/CharacterVoicePanel';
 import {
   buildPreviewTargetEntityCandidate,
   computeDeterministicApprovalAuditId,
@@ -170,6 +174,7 @@ export default function App() {
   });
 
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
+  const [voiceRewriteSelection, setVoiceRewriteSelection] = useState<VoiceRewriteSelection | null>(null);
   const [selectedProposalForReviewId, setSelectedProposalForReviewId] =
     useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
@@ -2715,11 +2720,49 @@ export default function App() {
   };
 
   const handleNavigate = (tab: NavTab, targetEpisodeId?: string) => {
+    setVoiceRewriteSelection(null);
     if (targetEpisodeId) {
       setSelectedEpisodeId(targetEpisodeId);
     }
     setActiveTab(tab);
     setMobileNavOpen(false);
+  };
+
+  const handleSaveCharacterVoice = async (next: PromptProfile, base: PromptProfile | null, sources: VoiceSourceReference[] = []) => {
+    const ownerId = currentUser?.uid || activeProject?.ownerId;
+    if (!ownerId || next.ownerId !== ownerId || next.projectId !== activeProject?.id ||
+        !characters.some((entry) => entry.id === next.targetCharacterId && entry.ownerId === ownerId && entry.projectId === next.projectId)) {
+      throw new Error('현재 작품에서 화법을 저장할 인물을 확인할 수 없습니다.');
+    }
+    const applyProfile = (bundle: ProjectBundle, committed: PromptProfile) => {
+      if (bundle.project.id !== committed.projectId || bundle.project.ownerId !== committed.ownerId) return bundle;
+      const profiles = bundle.writingPromptProfiles?.length ? bundle.writingPromptProfiles : promptProfiles;
+      const existing = profiles.find((profile) => profile.id === committed.id);
+      if (existing && existing.currentVersionNumber > committed.currentVersionNumber) return bundle;
+      return { ...bundle, writingPromptProfiles: existing ? profiles.map((profile) => profile.id === committed.id ? committed : profile) : [...profiles, committed] };
+    };
+    const saveLocalVoice = async () => {
+      const snapshot = loadLocalBundles(ownerId);
+      const bundle = snapshot.find((entry) => entry.project.id === next.projectId && entry.project.ownerId === ownerId);
+      if (!bundle) throw new Error('로컬 저장소에서 현재 작품을 찾을 수 없습니다.');
+      for (const source of sources) {
+        if (!source.revisionId) continue;
+        const revision = bundle.revisions.find((entry) => entry.id === source.revisionId && entry.episodeId === source.episodeId);
+        const episode = bundle.episodes.find((entry) => entry.id === source.episodeId);
+        if (!revision || !episode || (episode.latestRevisionId || undefined) !== (source.latestRevisionId || undefined) ||
+            computeManuscriptContentHash(revision.content) !== source.contentHash) throw new Error('STALE_SOURCE: 출처를 다시 분석해 주세요.');
+      }
+      return saveCharacterVoicePromptCore({
+        next, base, storageMode: 'LOCAL_STORE',
+        remote: bundle.writingPromptProfiles?.find((profile) => profile.id === next.id) ?? null,
+        write: async (profile) => saveLocalBundles(snapshot.map((entry) => applyProfile(entry, profile))),
+      });
+    };
+    const committed = currentUser ? await saveFirestoreCharacterVoicePrompt(next, base, sources)
+      : await (navigator.locks ? navigator.locks.request('novelforge-voice-persistence', saveLocalVoice) : saveLocalVoice());
+    if (currentUser) updateBundlesAndPersist((previous) => previous.map((bundle) => applyProfile(bundle, committed)));
+    else setBundles(loadLocalBundles(ownerId));
+    return committed;
   };
 
   const pendingProposalCount = useMemo(
@@ -3075,6 +3118,7 @@ export default function App() {
             <ManuscriptView
               projectId={activeProject.id}
               project={activeProject}
+              voiceRewriteSelection={voiceRewriteSelection?.projectId === activeProject.id ? voiceRewriteSelection : null}
               episodes={episodes}
               characters={characters}
               worldbuilding={worldbuilding}
@@ -3085,7 +3129,7 @@ export default function App() {
               selectedEpisodeId={selectedEpisodeId}
               saveState={saveState}
               lastSavedAt={lastSavedAt}
-              onSelectEpisode={(id) => setSelectedEpisodeId(id)}
+              onSelectEpisode={(id) => { setVoiceRewriteSelection(null); setSelectedEpisodeId(id); }}
               onCreateEpisode={handleCreateEpisode}
               onSaveEpisode={handleSaveEpisode}
               onDeleteEpisode={handleDeleteEpisode}
@@ -3184,6 +3228,16 @@ export default function App() {
 
           {activeTab === 'characters' && activeProject && (
             <CharactersView
+              key={activeProject.id}
+              voiceWorkspace={{
+                projectId: activeProject.id, ownerId: currentUser?.uid || activeProject.ownerId,
+                revisions, relationships, profiles: promptProfiles, cloud: Boolean(currentUser), getIdToken,
+                onSave: handleSaveCharacterVoice,
+                onReload: (id) => currentUser ? handleReloadPromptProfile(id) : Promise.resolve(
+                  loadLocalBundles(activeProject.ownerId).find((bundle) => bundle.project.id === activeProject.id)
+                    ?.writingPromptProfiles?.find((profile) => profile.id === id) ?? null),
+                onOpenRewrite: (selection) => { handleNavigate('manuscript', selection.episodeId); setVoiceRewriteSelection(selection); },
+              }}
               characters={characters}
               episodes={episodes}
               worldbuilding={worldbuilding}

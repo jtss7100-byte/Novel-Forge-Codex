@@ -17,8 +17,10 @@ import type {
 } from '../types/novel';
 import { validateCharacterInput } from '../utils/novelLogic';
 import { ConfirmModal } from './ConfirmModal';
+import { CharacterVoicePanel, type CharacterVoicePanelProps } from './CharacterVoicePanel';
 
 interface CharactersViewProps {
+  voiceWorkspace: Omit<CharacterVoicePanelProps, 'character' | 'characters' | 'episodes'>;
   characters: Character[];
   episodes: Episode[];
   worldbuilding: WorldbuildingItem[];
@@ -32,6 +34,7 @@ interface CharactersViewProps {
 const ROLE_PRESETS = ['주인공', '주연', '조력자', '적대자', '조연', '흑막 / 보스'];
 
 export const CharactersView: React.FC<CharactersViewProps> = ({
+  voiceWorkspace,
   characters,
   episodes,
   worldbuilding,
@@ -40,6 +43,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
   onDeleteCharacter,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [voiceCharacterId, setVoiceCharacterId] = useState<string>();
   const [statusFilter, setStatusFilter] = useState<'all' | SettingStatus>('all');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingCharacter, setEditingCharacter] = useState<Character | null>(null);
@@ -174,8 +178,14 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     );
   };
 
+  const voiceCharacter = characters.find((item) => item.id === voiceCharacterId);
+
   return (
     <div className="space-y-6">
+      {voiceCharacter && <div id="character-voice-workspace">
+        <button type="button" className="mb-2 text-sm text-slate-300 hover:text-amber-300" onClick={() => setVoiceCharacterId(undefined)}>화법 작업 닫기</button>
+        <CharacterVoicePanel key={voiceCharacter.id} {...voiceWorkspace} character={voiceCharacter} characters={characters} episodes={episodes} />
+      </div>}
       {/* Header & Search / Status Filter Bar */}
       <div className="flex flex-col justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5 lg:flex-row lg:items-center">
         <div>
@@ -552,6 +562,12 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
+                      <button type="button" aria-label={`${char.name} 화법 분석 및 검사`}
+                        className="rounded px-2 py-1 text-xs text-amber-300 hover:bg-slate-800"
+                        onClick={() => {
+                          setVoiceCharacterId(char.id);
+                          requestAnimationFrame(() => document.getElementById('character-voice-workspace')?.scrollIntoView({ block: 'start' }));
+                        }}>화법 DNA</button>
                       <button
                         type="button"
                         onClick={() => openEditForm(char)}

@@ -51,6 +51,7 @@ import {
   validateAndSpliceRewriteSelection,
   validateRewriteSelectionTarget,
 } from './manuscriptIntegrity';
+import { isEligibleDialoguePrompt } from './voicePromptScope';
 export {
   computeManuscriptContentHash,
   createRewriteSelectionAnchor,
@@ -642,6 +643,7 @@ export function buildWritingContext(params: {
   worldbuilding: WorldbuildingItem[];
   promptProfiles: PromptProfile[];
   selectedCharacterIds?: string[];
+  sceneCharacterIds?: string[];
   selectedPromptProfileIds?: string[];
   writingMode: WritingMode;
   narrativePerspective?: NarrativePerspective;
@@ -830,13 +832,25 @@ export function buildWritingContext(params: {
       ? new Set(selectedPromptProfileIds)
       : null;
 
+  const sceneCharacterIds = [...new Set(params.sceneCharacterIds ?? selectedCharacterIds ?? [])]
+    .filter((id) => characters.some((character) => character.id === id &&
+      character.projectId === project.id && character.ownerId === project.ownerId));
+  const voiceScope = { ownerId: project.ownerId, projectId: project.id, characterIds: sceneCharacterIds };
+  if (!sceneCharacterIds.length && normalizedProfiles.some((p) =>
+    p.promptType === 'CHARACTER_DIALOGUE_RULES' && p.targetCharacterId && p.isActive && p.projectId === project.id && p.ownerId === project.ownerId
+  )) {
+    missingEvidenceNotes.push('현재 장면 등장인물이 지정되지 않아 인물별 화법 규칙을 적용하지 않습니다.');
+  }
+
   const activePrompts = explicitEmptySelection
     ? []
     : normalizedProfiles
         .filter((p) => {
           const isProjectEligible =
             p.projectId === project.id || p.projectId === 'GLOBAL';
-          if (!p.isActive || !isProjectEligible) {
+          if (!p.isActive || !isProjectEligible ||
+              (p.promptType === 'CHARACTER_DIALOGUE_RULES' && p.ownerId !== project.ownerId) ||
+              !isEligibleDialoguePrompt(p, voiceScope)) {
             return false;
           }
           if (promptSet) {
@@ -865,6 +879,8 @@ export function buildWritingContext(params: {
             content: p.content,
             isActive: p.isActive,
             projectId: p.projectId,
+            ownerId: p.ownerId,
+            targetCharacterId: p.targetCharacterId,
           };
         });
 
@@ -924,6 +940,8 @@ export function buildWritingContext(params: {
     rewriteSelectionAnchor,
     approvedExceptions: validExceptions,
     activePrompts,
+    ownerId: project.ownerId,
+    sceneCharacterIds,
     referencedSources,
     missingEvidenceNotes,
   };
@@ -1283,8 +1301,14 @@ export function assembleNovelWriterPromptInOrder(params: {
   const styleProfiles = activePromptsList.filter(
     (p) => p.promptType === 'PROJECT_STYLE_PROFILE'
   );
+  const scopedSceneIds = scenePlan
+    ? context.sceneCharacterIds?.filter((id) => scenePlan.characterIds?.includes(id))
+    : context.sceneCharacterIds;
   const dialogueProfiles = activePromptsList.filter(
-    (p) => p.promptType === 'CHARACTER_DIALOGUE_RULES'
+    (p) => p.promptType === 'CHARACTER_DIALOGUE_RULES' && p.isActive !== false &&
+      (!p.projectId || p.projectId === context.projectId || p.projectId === 'GLOBAL') &&
+      (!p.ownerId || !context.ownerId || p.ownerId === context.ownerId) &&
+      isEligibleDialoguePrompt(p, { ownerId: context.ownerId, projectId: context.projectId, characterIds: scopedSceneIds })
   );
   const sceneInstructionProfiles = activePromptsList.filter(
     (p) => p.promptType === 'SCENE_INSTRUCTIONS'
@@ -1453,7 +1477,7 @@ export function assembleNovelWriterPromptInOrder(params: {
     '[6단계: 등장인물별 말투 설정 및 신체·심리 상태 반영]',
     dialogueProfiles.length > 0
       ? dialogueProfiles
-          .map((p) => `### ${p.title} (${p.versionId})\n${p.content}`)
+          .map((p) => `### ${p.title} (${p.versionId})${p.targetCharacterId ? ` · 발화 인물 ID: ${p.targetCharacterId}` : ''}\n${p.content}`)
           .join('\n\n')
       : '- 인물별 말투, 어미, 호칭 및 존비칭 관계를 유지하고 신체적 조건(부상, 피로, 소지품)을 무시한 행동을 작성하지 않습니다.',
     '',

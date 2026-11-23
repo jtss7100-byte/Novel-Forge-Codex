@@ -287,6 +287,7 @@ export interface LiteraryRewriteRequest {
   manuscript: string;
   anchor: RewriteSelectionAnchor;
   modes: LiteraryRewriteMode[];
+  confirmedVoiceCharacterId?: string;
   authorInstruction?: string;
   linkedQualityFindingId?: string;
   linkedQualityDimension?: LiteraryQualityDimensionId;

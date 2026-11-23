@@ -45,6 +45,7 @@ import {
   validateAndSpliceRewriteSelection,
   validateRewriteSelectionTarget,
 } from '../utils/manuscriptIntegrity';
+import { isScopedVoicePrompt, restrictWritingVoiceScope } from '../utils/voicePromptScope';
 import {
   indexMemoryInputOnServer,
   retrieveVerifiedMemoryForWritingOnServer,
@@ -1032,6 +1033,7 @@ export async function generateNovelSceneOnServer(params: {
       '회차 첫 장면 시작';
 
     let finalManuscriptState: WriterManuscriptState = 'DRAFT_READY';
+    const usedScopedVoiceIds = new Set<string>();
 
     for (const scenePlan of targetList) {
       if (abortController.signal.aborted) {
@@ -1052,8 +1054,13 @@ export async function generateNovelSceneOnServer(params: {
         break;
       }
 
+      const sceneContext = restrictWritingVoiceScope(enrichedContext,
+        (enrichedContext.sceneCharacterIds || []).filter((id) => scenePlan.characterIds?.includes(id)));
+      for (const profile of sceneContext.activePrompts) {
+        if (profile.promptType === 'CHARACTER_DIALOGUE_RULES' && isScopedVoicePrompt(profile)) usedScopedVoiceIds.add(profile.profileId);
+      }
       const assembledSceneOrder = assembleNovelWriterPromptInOrder({
-        context: enrichedContext,
+        context: sceneContext,
         scenePlan,
         totalScenesInPlan: plan?.scenes?.length ?? 1,
         episodeGoal: plan?.episodeGoal,
@@ -1187,9 +1194,13 @@ export async function generateNovelSceneOnServer(params: {
         sceneOutputs,
         issues: mappedIssues,
         proposals: mappedProposals,
-        referencedSources: enrichedContext.referencedSources,
+        referencedSources: enrichedContext.referencedSources.filter((source) => source.entityType !== 'PROMPT_PROFILE' ||
+          !enrichedContext.activePrompts.some((profile) => profile.profileId === source.entityId &&
+            profile.promptType === 'CHARACTER_DIALOGUE_RULES' && isScopedVoicePrompt(profile) && !usedScopedVoiceIds.has(profile.profileId))),
         referencedMemoryChunks: enrichedContext.retrievedMemoryChunks,
-        appliedPromptVersionIds: enrichedContext.activePrompts.map((p) => p.versionId),
+        appliedPromptVersionIds: enrichedContext.activePrompts.filter((profile) =>
+          profile.promptType !== 'CHARACTER_DIALOGUE_RULES' || !isScopedVoicePrompt(profile) || usedScopedVoiceIds.has(profile.profileId))
+          .map((p) => p.versionId),
         appliedMasterRulesVersion,
         modelId,
         usageMetadata: totalUsage,

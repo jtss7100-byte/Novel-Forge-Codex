@@ -433,6 +433,8 @@ export interface RewriteSelectionAnchor {
 
 export interface WritingContextBundle {
   projectId: string;
+  ownerId?: string;
+  sceneCharacterIds?: string[];
   projectTitle: string;
   projectGenre: string;
   projectSynopsis: string;
@@ -487,6 +489,8 @@ export interface WritingContextBundle {
     content: string;
     isActive?: boolean;
     projectId?: string;
+    ownerId?: string;
+    targetCharacterId?: string;
   }[];
   referencedSources: ReferencedSource[];
   /** Phase 3: Verified long-term RAG memory chunks retrieved for this writing session */

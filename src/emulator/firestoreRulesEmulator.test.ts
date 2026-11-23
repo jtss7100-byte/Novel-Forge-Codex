@@ -44,6 +44,7 @@ import {
   persistFirestoreChangeProposalsIdempotently,
   persistSingleFirestoreProposalAtomically,
   updateFirestorePromptProfileWithCas,
+  saveFirestoreCharacterVoicePrompt,
 } from '../services/novelRepository.ts';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity.ts';
 import {
@@ -53,6 +54,7 @@ import {
 import {
   assembleNovelWriterPromptInOrder,
   buildWritingContext,
+  createNewPromptProfile,
   restorePromptProfileToVersion,
   updatePromptProfileContent,
 } from '../utils/aiEngineLogic.ts';
@@ -63,6 +65,9 @@ import {
   extractStylePromptMetadata,
 } from '../utils/authorStyleLogic.ts';
 import { analyzeAuthorStyleOnServer } from '../server/authorStyleAnalyzer.ts';
+import { analyzeCharacterVoice } from '../server/characterVoiceAnalyzer.ts';
+import { buildApprovedVoiceContent, voiceProfileId } from '../utils/characterVoiceLogic.ts';
+import { createInitialSeedBundle } from '../utils/seedData.ts';
 import { verifyServerCanonEvidenceForRewrite } from '../server/canonEvidenceGate.ts';
 import {
   createIsolatedTestFirestoreClient,
@@ -1993,6 +1998,86 @@ test('Emulator Test 8 (P0 Stage 2.1 + 2.2): Real Revision provenance verificatio
       otherUser.cleanup(),
       adminHandle.cleanup(),
     ]);
+  }
+});
+
+test('Emulator Test 10: Character Voice DNA tenant isolation, source Revision, CAS and approved scope', async () => {
+  const env = assertRulesEmulatorEnv();
+  const run = `voice_${Date.now()}`;
+  const makeUser = (label: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel: label, email: `${label}-${run}@novelforge.local`, password: 'VoiceTest#1881',
+    appName: `client_${label}_${run}`, adminAppName: `admin_${label}_${run}`,
+  });
+  const owner = await makeUser('voice-owner');
+  const other = await makeUser('voice-other');
+  const handle = createIsolatedTestFirestoreClient({ runId: run, projectId: env.projectId, databaseId: env.databaseId });
+  const projectId = 'voice_project';
+  const base = `users/${owner.uid}/projects/${projectId}`;
+  const characterId = 'voice_character';
+  const foreignId = 'foreign_character';
+  const episodeId = 'voice_episode';
+  const revisionId = 'voice_revision';
+  const content = '“북문을 먼저 살피겠습니다.” 카엘이 말했다.\n“경비를 다시 배치하겠습니다.” 카엘이 말했다.\n“확인해 주시겠습니까?” 카엘이 물었다.';
+  const seed = createInitialSeedBundle(owner.uid);
+  const project = { ...seed.project, ownerId: owner.uid, id: projectId };
+  const character = { ...seed.characters[0], id: characterId, name: '카엘', ownerId: owner.uid, projectId };
+  const episode = { ...seed.episodes[0], id: episodeId, ownerId: owner.uid, projectId, latestRevisionId: revisionId, content, linkedCharacterIds: [characterId] };
+  const revision = { id: revisionId, ownerId: owner.uid, projectId, episodeId, content };
+  const firestore = handle.db;
+  try {
+    const characterRef = firestore.doc(`${base}/characters/${characterId}`);
+    const revisionRef = firestore.doc(`${base}/revisions/${revisionId}`);
+    await Promise.all([
+      firestore.doc(base).set(project),
+      characterRef.set(character),
+      revisionRef.set(revision),
+      firestore.doc(`${base}/episodes/${episodeId}`).set(episode),
+      firestore.doc(`users/${owner.uid}/projects/other_voice_project/characters/${foreignId}`)
+        .set({ ...character, id: foreignId, projectId: 'other_voice_project' }),
+    ]);
+    const input = { mode: 'SAVED' as const, episodeId, revisionId, contentHash: computeManuscriptContentHash(content), sceneKind: 'UNKNOWN' as const };
+    const request = { projectId, characterId, input, useGemini: false };
+    const candidate = await analyzeCharacterVoice(request, owner.uid, firestore);
+    assert.equal(candidate.status, 'READY_FOR_REVIEW');
+    assert.equal(candidate.sourceReferences[0].revisionId, revisionId);
+    assert.equal(candidate.sourceReferences[0].contentHash, input.contentHash);
+    await assert.rejects(analyzeCharacterVoice(request, other.uid, firestore), /소유권/);
+    await assert.rejects(analyzeCharacterVoice({ ...request, characterId: foreignId }, owner.uid, firestore), /인물을 확인/);
+    await assert.rejects(analyzeCharacterVoice({ ...request, input: { ...input, contentHash: computeManuscriptContentHash('different') } }, owner.uid, firestore), /STALE_SOURCE/);
+    const initial = {
+      ...createNewPromptProfile({ ownerId: owner.uid, projectId, targetCharacterId: characterId, promptType: 'CHARACTER_DIALOGUE_RULES',
+        title: '승인 화법', description: '검증', content: buildApprovedVoiceContent(candidate, candidate.suggestedInstructions) }),
+      id: voiceProfileId(characterId),
+    };
+    const created = await saveFirestoreCharacterVoicePrompt(initial, null, candidate.sourceReferences, owner.db);
+    assert.equal(created.targetCharacterId, characterId);
+    const stored = await getDoc(doc(owner.db, `${base}/writingPromptProfiles/${initial.id}`));
+    assert.equal(stored.data()?.targetCharacterId, characterId);
+    const retried = await saveFirestoreCharacterVoicePrompt(initial, null, candidate.sourceReferences, owner.db);
+    assert.equal(retried.currentVersionId, created.currentVersionId);
+    assert.equal((await firestore.collection(`${base}/writingPromptProfiles`).get()).size, 1);
+    const rawForeign = { ...stored.data(), id: voiceProfileId(foreignId), targetCharacterId: foreignId, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+    await assertPermissionDenied(() => setDoc(doc(owner.db, `${base}/writingPromptProfiles/${rawForeign.id}`), rawForeign), 'foreign project voice target');
+    await assertPermissionDenied(() => getDoc(doc(other.db, `${base}/writingPromptProfiles/${initial.id}`)), 'other user profile');
+    await assertPermissionDenied(() => getDoc(doc(other.db, `${base}/revisions/${revisionId}`)), 'other user revision');
+    const updates = [true, false].map((isActive) => updatePromptProfileContent(created, { content: `승인된 후보 ${isActive}`, isActive }));
+    const raced = await Promise.allSettled(updates.map((next) => saveFirestoreCharacterVoicePrompt(next, created, [], owner.db)));
+    const winners = raced.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    assert.equal(winners.length, 1);
+    const winner = winners[0];
+    assert.equal(winner.currentVersionNumber, 2);
+    assert.ok(winner.versions.some((version) => version.versionId === created.currentVersionId));
+    const inactive = await saveFirestoreCharacterVoicePrompt(updatePromptProfileContent(winner, { content: '비활성 검증', isActive: false }), winner, [], owner.db);
+    const ctx = buildWritingContext({
+      project, episode, allEpisodes: [episode], characters: [character], worldbuilding: [], promptProfiles: [inactive],
+      selectedCharacterIds: [characterId], writingMode: 'SINGLE_SCENE', plotOutline: '', requiredEvents: [], forbiddenDevelopments: [],
+    });
+    assert.ok(!ctx.activePrompts.some((profile) => profile.profileId === initial.id));
+    assert.deepEqual((await characterRef.get()).data(), character);
+    assert.equal((await revisionRef.get()).data()?.content, content);
+  } finally {
+    await firestore.recursiveDelete(firestore.doc(`users/${owner.uid}`));
+    await Promise.all([owner.cleanup(), other.cleanup(), handle.cleanup()]);
   }
 });
 

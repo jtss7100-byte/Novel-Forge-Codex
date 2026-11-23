@@ -42,8 +42,10 @@ import type { EpisodeRevisionCommitResult } from '../services/novelRepository';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
 import { ConfirmModal } from './ConfirmModal';
 import { AiWritingPanel } from './AiWritingPanel';
+import type { VoiceRewriteSelection } from './CharacterVoicePanel';
 
 interface ManuscriptViewProps {
+  voiceRewriteSelection?: VoiceRewriteSelection | null;
   projectId: string;
   project: Project;
   episodes: Episode[];
@@ -98,6 +100,7 @@ interface ManuscriptViewProps {
 }
 
 export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
+  voiceRewriteSelection,
   projectId,
   project,
   episodes,
@@ -937,6 +940,7 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
             {/* Phase 2: AI Writing Engine Studio Panel */}
             {showAiStudio && (
               <AiWritingPanel
+                voiceRewriteSelection={voiceRewriteSelection?.episodeId === activeEpisode.id ? voiceRewriteSelection : null}
                 project={project}
                 episode={activeEpisode}
                 allEpisodes={episodes}

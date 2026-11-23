@@ -89,8 +89,10 @@ import {
 } from '../utils/literaryRewritingLogic';
 import { generateEntityId } from '../utils/novelLogic';
 import { LiteraryQualityPanel } from './LiteraryQualityPanel';
+import type { VoiceRewriteSelection } from './CharacterVoicePanel';
 
 interface AiWritingPanelProps {
+  voiceRewriteSelection?: VoiceRewriteSelection | null;
   project: Project;
   episode: Episode;
   allEpisodes: Episode[];
@@ -207,6 +209,7 @@ const WORKFLOW_STATE_LABELS: Record<
 };
 
 export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
+  voiceRewriteSelection,
   project,
   episode,
   allEpisodes,
@@ -253,11 +256,13 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
   );
   const [selectedTextToRewrite, setSelectedTextToRewrite] = useState<string>('');
   const [selectedCharIds, setSelectedCharIds] = useState<string[]>(
-    () =>
-      episode.linkedCharacterIds.length > 0
-        ? episode.linkedCharacterIds
-        : characters.filter((c) => c.status === 'confirmed').map((c) => c.id)
+    () => episode.linkedCharacterIds
   );
+  const [sceneCastConfirmed, setSceneCastConfirmed] = useState(false);
+  useEffect(() => {
+    setSelectedCharIds(episode.linkedCharacterIds);
+    setSceneCastConfirmed(false);
+  }, [project.id, episode.id]);
   const [promptSelectionState, setPromptSelectionState] = useState<{
     projectId: string;
     selectedIds: string[];
@@ -408,6 +413,13 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
   const [rewriteInstruction, setRewriteInstruction] = useState<string>('');
   const [rewriteTargetAnchor, setRewriteTargetAnchor] =
     useState<RewriteSelectionAnchor | null>(null);
+  useEffect(() => {
+    if (!voiceRewriteSelection) return;
+    setRewriteTargetAnchor(voiceRewriteSelection.anchor);
+    setRewriteModes(['R3']);
+    setSelectedCharIds(voiceRewriteSelection.characterIds);
+    setSceneCastConfirmed(true);
+  }, [voiceRewriteSelection]);
   const [linkedQualityFindingMeta, setLinkedQualityFindingMeta] = useState<{
     findingId: string;
     dimension: LiteraryQualityDimensionId;
@@ -468,6 +480,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
       worldbuilding,
       promptProfiles,
       selectedCharacterIds: selectedCharIds,
+      sceneCharacterIds: sceneCastConfirmed ? selectedCharIds : [],
       selectedPromptProfileIds: selectedPromptIds,
       writingMode,
       narrativePerspective,
@@ -493,6 +506,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
     worldbuilding,
     promptProfiles,
     selectedCharIds,
+    sceneCastConfirmed,
     selectedPromptIds,
     writingMode,
     narrativePerspective,
@@ -1294,6 +1308,11 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
           manuscript: activeManuscriptForEval,
           anchor: verifiedAnchor,
           modes: rewriteModes,
+          confirmedVoiceCharacterId: voiceRewriteSelection &&
+            voiceRewriteSelection.anchor.sourceContentHash === verifiedAnchor.sourceContentHash &&
+            voiceRewriteSelection.anchor.startOffset === verifiedAnchor.startOffset &&
+            voiceRewriteSelection.anchor.endOffset === verifiedAnchor.endOffset
+              ? voiceRewriteSelection.characterIds[0] : undefined,
           authorInstruction: rewriteInstruction.trim(),
           linkedQualityFindingId: linkedQualityFindingMeta?.findingId,
           linkedQualityDimension: linkedQualityFindingMeta?.dimension,
@@ -1884,6 +1903,12 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
   };
 
   const toggleCharacterSelection = (charId: string) => {
+    if (!sceneCastConfirmed) {
+      setSelectedCharIds([charId]);
+      setSceneCastConfirmed(true);
+      return;
+    }
+    setSceneCastConfirmed(true);
     setSelectedCharIds((prev) =>
       prev.includes(charId)
         ? prev.filter((id) => id !== charId)
@@ -2199,6 +2224,9 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
             <div className="text-[11px] font-medium text-slate-300 mb-1.5">
               집필 투입 등장인물 선택 (확정 CANON 설정만 근거로 반영됨)
             </div>
+            <label className="mb-2 block text-xs text-slate-400">
+              <input type="checkbox" checked={sceneCastConfirmed} onChange={(event) => setSceneCastConfirmed(event.target.checked)} /> 선택한 인물을 현재 장면의 화법 적용 범위로 확인
+            </label>
             <div className="flex flex-wrap gap-1.5">
               {characters.map((ch) => {
                 const selected = selectedCharIds.includes(ch.id);

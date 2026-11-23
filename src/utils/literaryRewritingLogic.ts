@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { extractVoiceExcerpts } from './characterVoiceLogic';
+import { isEligibleDialoguePrompt } from './voicePromptScope';
 import LITERARY_REWRITE_CANDIDATE_JSON_SCHEMA from '../schemas/literary_rewrite_candidate.schema.json';
 import type { ChangeProposal, NarrativePerspective } from '../types/foundation';
 import type { TokenUsageMetadata } from '../types/aiEngine';
@@ -570,6 +572,26 @@ export function validateRewriteCandidateBeforeApply(params: {
 // 4. Prompt Builder (Isolated from Unverified Raw Logs, Strict Context Order)
 // ============================================================================
 
+function selectedRewriteVoices(request: LiteraryRewriteRequest) {
+  const selected = extractVoiceExcerpts(request.manuscript, request.context.canonCharacters, undefined, undefined, request.anchor);
+  const confirmed = request.confirmedVoiceCharacterId;
+  if (confirmed && request.context.canonCharacters.some((character) => character.id === confirmed) &&
+      selected.length === 1 && selected[0].startOffset === request.anchor.startOffset &&
+      selected[0].endOffset === request.anchor.endOffset) {
+    return [{ ...selected[0], characterId: confirmed, attribution: 'AUTHOR_CONFIRMED' as const }];
+  }
+  return selected;
+}
+
+function voiceScopeForRewrite(request: LiteraryRewriteRequest) {
+  const ctx = request.context;
+  const ids = request.modes.includes('R3')
+    ? selectedRewriteVoices(request)
+        .flatMap((entry) => entry.characterId && ctx.sceneCharacterIds?.includes(entry.characterId) ? [entry.characterId] : [])
+    : [];
+  return { ownerId: ctx.ownerId, characterIds: ids };
+}
+
 export function filterEligibleActivePromptsForContext(
   activePrompts: {
     profileId: string;
@@ -581,15 +603,19 @@ export function filterEligibleActivePromptsForContext(
     content: string;
     isActive?: boolean;
     projectId?: string;
+    ownerId?: string;
+    targetCharacterId?: string;
   }[] | undefined,
-  projectId: string
+  projectId: string,
+  scope?: { ownerId?: string; characterIds?: readonly string[] }
 ) {
   return (activePrompts || []).filter((p) => {
     if (p.isActive === false) return false;
     if (p.projectId && p.projectId !== projectId && p.projectId !== 'GLOBAL') {
       return false;
     }
-    return true;
+    if (p.promptType === 'CHARACTER_DIALOGUE_RULES' && scope?.ownerId && p.ownerId && p.ownerId !== scope.ownerId) return false;
+    return isEligibleDialoguePrompt(p, { ...scope, projectId });
   });
 }
 
@@ -692,7 +718,8 @@ export function buildLiteraryRewritePrompt(params: {
 
   const eligibleActivePrompts = filterEligibleActivePromptsForContext(
     ctx.activePrompts,
-    request.projectId || ctx.projectId
+    request.projectId || ctx.projectId,
+    voiceScopeForRewrite(request)
   );
 
   const orderedActivePrompts = [...eligibleActivePrompts].sort(
@@ -706,7 +733,7 @@ export function buildLiteraryRewritePrompt(params: {
   const activePromptBlock = orderedActivePrompts
     .map((p) => {
       const charBudget = p.promptType === 'PROJECT_STYLE_PROFILE' ? 2400 : 800;
-      return `  - (${p.promptType} | ${p.title} | ${p.versionId} v${p.versionNumber ?? 1}):\n${sanitizeEmbeddedDataAgainstCommandInjection(
+      return `  - (${p.promptType} | ${p.title} | ${p.versionId} v${p.versionNumber ?? 1}${p.targetCharacterId ? ` | 발화 인물 ID: ${p.targetCharacterId}` : ''}):\n${sanitizeEmbeddedDataAgainstCommandInjection(
         p.content.slice(0, charBudget)
       )}`;
     })
@@ -721,6 +748,7 @@ export function buildLiteraryRewritePrompt(params: {
     '4. 게임 시스템 UI 표현([시스템], 상태창, 레벨 등)은 작품에 관련 설정이 명시된 경우 외에는 절대 삽입하지 마십시오.',
     '5. 원문이 이미 완성도가 높고 수정 시 오히려 문체/개성이 손상될 위험이 크다면 decision을 NO_OP_OPTIMAL로 설정하고 rewrittenExcerpt에 원문 발췌 그대로를 반환하십시오.',
     '6. 영구 설정 변경 제안이 필요할 때만 candidateLoreProposals에 기록하며, 본문(rewrittenExcerpt) 안에는 [설정 충돌 확인 요청] 같은 메타 메모를 절대 삽입하지 마십시오.',
+    '7. R3 인물별 규칙은 ID가 일치하는 화자의 확인된 발화에만 적용한다. 호칭·감정선·신체 상태와 사건 의미를 보존하며 화자가 모호하면 원문 말투를 유지한다.',
   ].join('\n');
 
   const userPrompt = [
@@ -885,6 +913,23 @@ export function validateAndVerifyRewriteCandidate(params: {
       description: a.description.trim(),
     })
   );
+
+  if (request.modes.includes('R3')) {
+    const scope = voiceScopeForRewrite(request);
+    const protectedTargets = new Set(filterEligibleActivePromptsForContext(ctx.activePrompts, request.projectId, scope)
+      .flatMap((profile) => profile.promptType === 'CHARACTER_DIALOGUE_RULES' && profile.targetCharacterId ? [profile.targetCharacterId] : []));
+    if (protectedTargets.size) {
+      const before = selectedRewriteVoices(request);
+      const endOffset = target.startOffset + cleanRewrittenExcerpt.length;
+      const after = extractVoiceExcerpts(splicedPreviewManuscript, ctx.canonCharacters, undefined, undefined, { startOffset: target.startOffset, endOffset });
+      if (before.length !== after.length || before.some((entry, index) =>
+        (entry.attribution === 'EXPLICITLY_OBSERVED' && entry.characterId !== after[index]?.characterId) ||
+        ((!entry.characterId || !protectedTargets.has(entry.characterId)) && entry.text !== after[index]?.text))) {
+        alerts.push({ severity: 'CRITICAL_BLOCK', source: 'SERVER_VERIFIER', referenceLoreId: null,
+          description: 'R3 인물별 화법 적용 범위 밖의 발화가 변경되었거나 화자 구간을 확인할 수 없어 수정안을 보류했습니다.' });
+      }
+    }
+  }
 
   // Check unauthorized game system tokens if !ctx.hasGameSystemInWorldbuilding
   if (!ctx.hasGameSystemInWorldbuilding) {
@@ -1140,7 +1185,8 @@ export function validateAndVerifyRewriteCandidate(params: {
 
   const appliedPromptVersionIds = filterEligibleActivePromptsForContext(
     ctx.activePrompts,
-    request.projectId || ctx.projectId
+    request.projectId || ctx.projectId,
+    voiceScopeForRewrite(request)
   )
     .map((p) => p.versionId)
     .filter(Boolean);

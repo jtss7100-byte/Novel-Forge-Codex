@@ -953,6 +953,13 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      function hasOwnedDialogueTarget() {
+        let targetId = incoming().targetCharacterId;
+        let target = /databases/$(database)/documents/users/$(uid)/projects/$(projectId)/characters/$(targetId);
+        return incoming().promptType != 'CHARACTER_DIALOGUE_RULES' || targetId == '' ||
+          (exists(target) && get(target).data.ownerId == uid && get(target).data.projectId == projectId && get(target).data.id == targetId);
+      }
+
       // WritingPromptProfiles Subcollection (Phase 2 & Phase 4.3C Stage 1.1 Atomic CAS)
       match /writingPromptProfiles/{profileId} {
         allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
@@ -961,6 +968,8 @@ service cloud.firestore {
         allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
         allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
           isValidWritingPromptProfile(incoming()) &&
+          hasOwnedDialogueTarget() &&
+          (!profileId.matches('^voice_.*') || (incoming().promptType == 'CHARACTER_DIALOGUE_RULES' && incoming().targetCharacterId != '')) &&
           incoming().id == profileId &&
           incoming().projectId == projectId &&
           incoming().createdAt == request.time &&
@@ -968,6 +977,9 @@ service cloud.firestore {
           isParentProjectOwner(uid, projectId);
         allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
           isValidWritingPromptProfile(incoming()) &&
+          hasOwnedDialogueTarget() &&
+          (!profileId.matches('^voice_.*') || (incoming().promptType == 'CHARACTER_DIALOGUE_RULES' &&
+            incoming().targetCharacterId != '' && incoming().targetCharacterId == existing().targetCharacterId)) &&
           existing().ownerId == request.auth.uid &&
           incoming().id == existing().id &&
           incoming().ownerId == existing().ownerId &&

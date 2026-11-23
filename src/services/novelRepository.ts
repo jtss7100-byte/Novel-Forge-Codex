@@ -15,6 +15,8 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
+import { voiceProfileId } from '../utils/characterVoiceLogic';
+import type { VoiceSourceReference } from '../types/characterVoice';
 import type {
   PersistChangeProposalsOptions,
   PersistChangeProposalsResult,
@@ -3989,6 +3991,97 @@ export async function updateFirestorePromptProfileWithCas(
       conflictDetails: classified.conflictDetails,
     };
   }
+}
+
+export async function saveCharacterVoicePromptCore(params: {
+  next: PromptProfile;
+  base: PromptProfile | null;
+  remote: PromptProfile | null;
+  storageMode: 'CLOUD_FIRESTORE' | 'LOCAL_STORE';
+  write: (profile: PromptProfile) => Promise<void>;
+}): Promise<PromptProfile> {
+  const { next, base, remote, storageMode, write } = params;
+  if (next.promptType !== 'CHARACTER_DIALOGUE_RULES' || !next.targetCharacterId ||
+      next.id !== voiceProfileId(next.targetCharacterId) ||
+      !validatePromptProfileForFirestoreSchema(next.ownerId, next.projectId, next).valid) {
+    throw new Error('유효한 인물별 화법 프롬프트가 필요합니다.');
+  }
+  if (remote && (remote.id !== next.id || remote.promptType !== next.promptType ||
+      remote.ownerId !== next.ownerId || remote.projectId !== next.projectId ||
+      remote.targetCharacterId !== next.targetCharacterId)) {
+    throw new Error('인물 화법 프로필의 소유자나 대상이 일치하지 않습니다.');
+  }
+  const exactRetry = remote && remote.content === next.content && remote.isActive === next.isActive &&
+    remote.title === next.title && remote.description === next.description &&
+    (remote.currentVersionId === next.currentVersionId || (!base && remote.currentVersionNumber === 1) ||
+      (base && next.currentVersionNumber === base.currentVersionNumber + 1 &&
+        remote.currentVersionNumber === next.currentVersionNumber));
+  if (exactRetry) return remote;
+  if (!base && !remote && next.currentVersionNumber === 1) {
+    await write(next);
+    return next;
+  }
+  if (!base || !remote || base.id !== next.id) throw new Error('[VERSION_CONFLICT] 최신 화법 버전을 다시 불러와 주세요.');
+  const result = await updatePromptProfileWithCasCore({
+    uid: next.ownerId, projectId: next.projectId, nextProfile: next, storageMode,
+    expectedVersionId: base.currentVersionId, expectedVersionNumber: base.currentVersionNumber,
+    getRemoteProfileInTx: async () => remote, writeProfileInTx: write,
+  });
+  return result.profile;
+}
+
+export async function saveFirestoreCharacterVoicePrompt(
+  next: PromptProfile,
+  base: PromptProfile | null,
+  verifySources: VoiceSourceReference[] = [],
+  firestoreDb: Firestore = db
+): Promise<PromptProfile> {
+  const { ownerId, projectId, targetCharacterId } = next;
+  if (![ownerId, projectId, targetCharacterId].every((value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)) ||
+      !targetCharacterId || next.id !== voiceProfileId(targetCharacterId)) throw new Error('잘못된 인물 또는 작품 ID입니다.');
+  const path = `users/${ownerId}/projects/${projectId}`;
+  const ref = doc(firestoreDb, `${path}/writingPromptProfiles/${next.id}`);
+  return runTransaction(firestoreDb, async (tx) => {
+    const [profile, character] = await Promise.all([
+      tx.get(ref), tx.get(doc(firestoreDb, `${path}/characters/${targetCharacterId}`)),
+    ]);
+    const data = character.data();
+    if (data?.ownerId !== ownerId || data?.projectId !== projectId || data?.id !== targetCharacterId) {
+      throw new Error('현재 작품에서 승인할 인물을 확인할 수 없습니다.');
+    }
+    for (const source of verifySources) {
+      if (!source.revisionId && !source.episodeId) continue;
+      if (!source.episodeId || !source.revisionId || ![source.episodeId, source.revisionId].every((id) => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+        throw new Error('잘못된 분석 출처입니다.');
+      }
+      const [episodeSnap, revisionSnap] = await Promise.all([
+        tx.get(doc(firestoreDb, `${path}/episodes/${source.episodeId}`)),
+        tx.get(doc(firestoreDb, `${path}/revisions/${source.revisionId}`)),
+      ]);
+      const episode = episodeSnap.data();
+      const revision = revisionSnap.data();
+      if (episode?.ownerId !== ownerId || episode?.projectId !== projectId || episode?.id !== source.episodeId ||
+          revision?.ownerId !== ownerId || revision?.projectId !== projectId || revision?.id !== source.revisionId ||
+          revision?.episodeId !== source.episodeId || (episode?.latestRevisionId || undefined) !== (source.latestRevisionId || undefined) ||
+          typeof revision?.content !== 'string' || computeManuscriptContentHash(revision.content) !== source.contentHash) {
+        throw new Error('STALE_SOURCE: 승인 전에 출처 Revision을 다시 분석해 주세요.');
+      }
+    }
+    return saveCharacterVoicePromptCore({
+      next, base, storageMode: 'CLOUD_FIRESTORE',
+      remote: profile.exists() ? parsePromptProfileFromFirestoreData(profile.id, profile.data(), ownerId, projectId) : null,
+      write: async (profileToSave) => {
+        const fields = {
+          title: profileToSave.title, description: profileToSave.description,
+          targetCharacterId, content: profileToSave.content, isActive: profileToSave.isActive,
+          currentVersionId: profileToSave.currentVersionId, currentVersionNumber: profileToSave.currentVersionNumber,
+          versions: profileToSave.versions, updatedAt: serverTimestamp(),
+        };
+        if (profile.exists()) tx.update(ref, fields);
+        else tx.set(ref, { ...fields, id: next.id, ownerId, projectId, promptType: next.promptType, createdAt: serverTimestamp() });
+      },
+    });
+  });
 }
 
 export async function updateLocalPromptProfileWithCas(params: {

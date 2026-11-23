@@ -18,6 +18,8 @@ import {
 import { evaluateLiteraryQualityOnServer } from './literaryQualityEngine.ts';
 import { rewriteLiteraryPassageOnServer } from './literaryRewritingEngine.ts';
 import { analyzeAuthorStyleOnServer } from './authorStyleAnalyzer.ts';
+import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewCharacterContinuity, voiceAnalysisRequest, VoiceRequestError } from './characterVoiceAnalyzer.ts';
+import { resolveVoicePromptContext } from './voicePromptContext.ts';
 import {
   executeServerManuscriptExtraction,
   saveVerifiedExtractionProposalsOnServer,
@@ -245,7 +247,7 @@ export function createApiRouter(): express.Router {
       const result = await generateNovelSceneOnServer({
         runId,
         ownerId: ownerCheck.ownerId,
-        context,
+        context: await resolveVoicePromptContext(context, ownerCheck.ownerId, ownerCheck.isAuthenticatedCloud),
         plan,
         targetSceneNumber,
         expansionAction,
@@ -253,7 +255,7 @@ export function createApiRouter(): express.Router {
       res.status(200).json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'AI 본문 생성 중 오류가 발생했습니다.';
-      res.status(500).json({ error: msg });
+      res.status(err instanceof VoiceRequestError ? err.status : 500).json({ error: msg });
     }
   });
 
@@ -458,6 +460,8 @@ export function createApiRouter(): express.Router {
           manuscript,
           anchor,
           modes,
+          confirmedVoiceCharacterId: typeof req.body?.confirmedVoiceCharacterId === 'string'
+            ? req.body.confirmedVoiceCharacterId : undefined,
           authorInstruction:
             typeof req.body?.authorInstruction === 'string'
               ? req.body.authorInstruction
@@ -470,7 +474,7 @@ export function createApiRouter(): express.Router {
           allowUnverifiedTypoOnlyPreview: Boolean(
             req.body?.allowUnverifiedTypoOnlyPreview
           ),
-          context,
+          context: await resolveVoicePromptContext(context, ownerCheck.ownerId, ownerCheck.isAuthenticatedCloud),
         },
         {
           isAuthenticatedCloud: ownerCheck.isAuthenticatedCloud,
@@ -498,6 +502,29 @@ export function createApiRouter(): express.Router {
           ? 409
           : 500;
       res.status(statusCode).json({ error: msg });
+    }
+  });
+
+  app.post(['/api/ai/analyze-character-voice', '/api/ai/review-style-continuity'], async (req, res) => {
+    const owner = await resolveRequestOwner(req);
+    if (!owner.ok) {
+      res.status(owner.statusCode).json({ error: owner.error });
+      return;
+    }
+    try {
+      const db = owner.isAuthenticatedCloud ? getVoiceFirestore() : undefined;
+      if (req.path === '/api/ai/analyze-character-voice') {
+        const parsed = voiceAnalysisRequest.safeParse(req.body);
+        if (!parsed.success) throw new VoiceRequestError(400, '인물과 유효한 분석 표본을 선택해 주세요.');
+        res.json(await analyzeCharacterVoice(parsed.data, owner.ownerId, db));
+      } else {
+        const parsed = continuityRequest.safeParse(req.body);
+        if (!parsed.success) throw new VoiceRequestError(400, '저장된 Revision을 2개 이상 선택해 주세요.');
+        res.json(await reviewCharacterContinuity(parsed.data, owner.ownerId, db));
+      }
+    } catch (error) {
+      res.status(error instanceof VoiceRequestError ? error.status : 500)
+        .json({ error: error instanceof VoiceRequestError ? error.message : '화법 분석 중 서버 오류가 발생했습니다.' });
     }
   });
 
