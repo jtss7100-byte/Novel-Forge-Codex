@@ -1,0 +1,6 @@
+{
+  "name": "NOVEL FORGE — 장편 판타지 웹소설 집필 스튜디오",
+  "description": "장편 판타지 웹소설 작가를 위한 통합 원고 집필, 등장인물·세계관 설정 관리 및 버전 복원 스튜디오",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

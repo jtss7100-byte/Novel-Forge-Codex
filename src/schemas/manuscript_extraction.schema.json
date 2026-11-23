@@ -1,0 +1,304 @@
+{
+  "type": "object",
+  "description": "NOVEL FORGE Phase 4.2.1 원고 기반 구조화 설정 후보 추출 응답 스키마. UTF-16 원문 오프셋(startOffset, endOffset)과 canonStatus, ownerId, projectId는 AI가 계산하거나 결정하지 않으며 서버가 Revision.content 대조를 통해 직접 산출한다.",
+  "properties": {
+    "analysis_summary": {
+      "type": "string",
+      "description": "이번 회차 원고에서 발견된 주요 인물 관계 변화, 연표 사건, 복선 단서에 대한 간략한 편집자 요약"
+    },
+    "candidates": {
+      "type": "array",
+      "description": "원고 내 명확한 발췌문(excerpt) 근거를 가진 후보 목록",
+      "items": {
+        "type": "object",
+        "properties": {
+          "targetEntityType": {
+            "type": "string",
+            "enum": [
+              "RELATIONSHIP",
+              "TIMELINE_EVENT",
+              "FORESHADOWING"
+            ]
+          },
+          "proposedAction": {
+            "type": "string",
+            "enum": [
+              "CREATE",
+              "UPDATE"
+            ]
+          },
+          "existingTargetEntityId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "UPDATE 제안일 경우 서버가 제공한 기존 엔티티 ID. 신규 생성(CREATE)이거나 특정할 수 없으면 null"
+          },
+          "title": {
+            "type": "string",
+            "description": "제안서 제목 (1~150자)"
+          },
+          "rationale": {
+            "type": "string",
+            "description": "원고의 해당 문맥이 왜 이 설정 변경 또는 추가를 뒷받침하는지 설명"
+          },
+          "beforeSummary": {
+            "type": "string",
+            "description": "기존 설정 요약 (CREATE인 경우 '기존 등록된 설정 없음' 등)"
+          },
+          "afterSummary": {
+            "type": "string",
+            "description": "제안 반영 후 설정 요약"
+          },
+          "excerpt": {
+            "type": "string",
+            "description": "원고(Revision.content)에 실제로 등장하는 원문 그대로의 발췌 문자열. 임의 요약이나 문장 변형 금지"
+          },
+          "precedingContext": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "동일 발췌문이 원고 내 여러 번 등장할 때 위치를 특정하기 위한 직전 문맥 문자열 (선택)"
+          },
+          "followingContext": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "동일 발췌문이 원고 내 여러 번 등장할 때 위치를 특정하기 위한 직후 문맥 문자열 (선택)"
+          },
+          "sceneId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "제공된 장면 목록 중 발췌문이 속한 장면 ID (확인 불가 시 null)"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "0.0 ~ 1.0 사이의 추출 신뢰도"
+          },
+          "dialogueClaimOnly": {
+            "type": "boolean",
+            "description": "서술자의 객관적 묘사가 아니라 등장인물의 대사/주장/추측에만 의존하는 경우 true"
+          },
+          "temporalContextType": {
+            "type": "string",
+            "enum": [
+              "PRESENT_EVENT",
+              "FLASHBACK",
+              "PAST_MENTION",
+              "PROPHECY_OR_RUMOR",
+              "HYPOTHETICAL_OR_DREAM"
+            ],
+            "description": "발췌 문맥의 시제 성격 (회상/과거 언급/예언·소문/가상·꿈과 현재 사건 구분)"
+          },
+          "uncertaintyFlags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "AMBIGUOUS_CHARACTER_REFERENCE",
+                "HOMONYM_CHARACTER_NAME",
+                "NEW_UNREGISTERED_CHARACTER",
+                "DIALOGUE_CLAIM_ONLY",
+                "FLASHBACK_OR_PAST_MENTION",
+                "RUMOR_OR_PROPHECY",
+                "CONFLICTS_WITH_CANON",
+                "TIMELINE_ORDER_UNCERTAIN",
+                "CLUE_PHASE_UNCERTAIN"
+              ]
+            }
+          },
+          "relationshipPayload": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "sourceCharacterId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sourceCharacterName": {
+                "type": "string"
+              },
+              "targetCharacterId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "targetCharacterName": {
+                "type": "string"
+              },
+              "relationType": {
+                "type": "string"
+              },
+              "affinityScore": {
+                "type": "integer"
+              },
+              "isDirectional": {
+                "type": "boolean"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sourceCharacterId",
+              "sourceCharacterName",
+              "targetCharacterId",
+              "targetCharacterName",
+              "relationType",
+              "affinityScore",
+              "isDirectional",
+              "description"
+            ],
+            "additionalProperties": false
+          },
+          "timelineEventPayload": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "inUniverseDate": {
+                "type": "string"
+              },
+              "chronologicalOrder": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "involvedCharacterIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "involvedCharacterNames": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "locationWorldItemId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "locationName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "title",
+              "summary",
+              "inUniverseDate",
+              "chronologicalOrder",
+              "involvedCharacterIds",
+              "involvedCharacterNames",
+              "locationWorldItemId",
+              "locationName"
+            ],
+            "additionalProperties": false
+          },
+          "foreshadowingPayload": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "cluePhase": {
+                "type": "string",
+                "enum": [
+                  "PLANTED",
+                  "REINFORCED",
+                  "RESOLVED"
+                ]
+              },
+              "relatedCharacterIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "relatedCharacterNames": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "relatedEventIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "payoffNote": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "description",
+              "cluePhase",
+              "relatedCharacterIds",
+              "relatedCharacterNames",
+              "relatedEventIds",
+              "payoffNote"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "targetEntityType",
+          "proposedAction",
+          "existingTargetEntityId",
+          "title",
+          "rationale",
+          "beforeSummary",
+          "afterSummary",
+          "excerpt",
+          "precedingContext",
+          "followingContext",
+          "sceneId",
+          "confidence",
+          "dialogueClaimOnly",
+          "temporalContextType",
+          "uncertaintyFlags",
+          "relationshipPayload",
+          "timelineEventPayload",
+          "foreshadowingPayload"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "analysis_summary",
+    "candidates"
+  ],
+  "additionalProperties": false
+}

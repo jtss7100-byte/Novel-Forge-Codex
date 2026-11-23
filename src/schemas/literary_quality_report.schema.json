@@ -1,0 +1,101 @@
+{
+  "type": "object",
+  "description": "NOVEL FORGE Phase 4.3A 문학적 품질 평가 AI 응답 스키마. AI는 평가 요약, Q1~Q8 차원 분석, 근거 기반 수정 제안(findings)만 반환하며 원고 덮어쓰기나 CANON 승인은 절대 수행하지 않는다.",
+  "properties": {
+    "overallAssessment": {
+      "type": "string",
+      "description": "작품 문체와 장면 목적을 고려한 전체 편집 총평 (한국어 2~5문장)."
+    },
+    "dimensions": {
+      "type": "array",
+      "description": "Q1~Q8 8개 문학적 품질 차원에 대한 구체적 평가 목록.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]
+          },
+          "score": {
+            "type": ["number", "null"],
+            "description": "0~100 정수 점수 또는 판단 보류 시 null"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["HIGH", "MEDIUM", "LOW"]
+          },
+          "explanation": {
+            "type": "string",
+            "description": "해당 차원의 강점과 보완점에 대한 구체적 편집 근거."
+          }
+        },
+        "required": ["category", "score", "confidence", "explanation"],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "원고 내 실제 문장 발췌(originalExcerpt) 및 문자 오프셋(startOffset~endOffset)과 연결된 구체적 개선 제안.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8"]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["INFO", "SUGGESTION", "IMPORTANT"]
+          },
+          "originalExcerpt": {
+            "type": "string",
+            "description": "원고 본문에서 글자 하나 틀리지 않고 정확히 인용한 문제 구간 원문."
+          },
+          "startOffset": {
+            "type": ["integer", "null"],
+            "description": "원고 본문 내 0 기반 UTF-16 시작 오프셋 (선택 또는 null)."
+          },
+          "endOffset": {
+            "type": ["integer", "null"],
+            "description": "원고 본문 내 UTF-16 종료 오프셋 (선택 또는 null)."
+          },
+          "problem": {
+            "type": "string",
+            "description": "무엇이 어색하거나 독자 몰입을 저해하는지 핵심 진단."
+          },
+          "reason": {
+            "type": "string",
+            "description": "작품 시점·인물 말투·장면 인과에 근거한 상세 편집 이유."
+          },
+          "suggestedRevision": {
+            "type": ["string", "null"],
+            "description": "원문의 의미와 확정 설정을 훼손하지 않고 자연스럽게 다듬은 대안 문장 (또는 null)."
+          },
+          "expectedBenefit": {
+            "type": "string",
+            "description": "제안 적용 시 기대되는 독서 리듬·몰입감·인물 개성 개선 효과."
+          },
+          "canonRuleWarning": {
+            "type": ["string", "null"],
+            "description": "해당 구간이나 수정안이 확정 설정(CANON)·시점·말투 규칙과 관련하여 주의가 필요할 때만 기록, 없으면 null."
+          }
+        },
+        "required": [
+          "category",
+          "severity",
+          "originalExcerpt",
+          "startOffset",
+          "endOffset",
+          "problem",
+          "reason",
+          "suggestedRevision",
+          "expectedBenefit",
+          "canonRuleWarning"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["overallAssessment", "dimensions", "findings"],
+  "additionalProperties": false
+}

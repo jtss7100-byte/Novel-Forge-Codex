@@ -1,0 +1,1022 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isVerifiedOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidOptionalId(id) {
+      return id is string && id.size() <= 128 && (id.size() == 0 || id.matches('^[a-zA-Z0-9_\\-]+$'));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidStringList(arr) {
+      return arr is list && arr.size() <= 50 && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 128));
+    }
+
+    function isValidCanonStatus(status) {
+      return status is string && status in ['DRAFT', 'PROPOSED', 'CANON', 'REJECTED', 'ARCHIVED'];
+    }
+
+    function isValidActorType(actor) {
+      return actor is string && actor in ['AUTHOR', 'AI_ENGINE', 'SYSTEM'];
+    }
+
+    function isParentProjectOwner(uid, projectId) {
+      return exists(/databases/$(database)/documents/users/$(uid)/projects/$(projectId)) &&
+        get(/databases/$(database)/documents/users/$(uid)/projects/$(projectId)).data.ownerId == request.auth.uid;
+    }
+
+    // Validation Blueprint: Project
+    function isValidProject(data) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'genre', 'synopsis', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerId', 'title', 'genre', 'synopsis', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.genre is string && data.genre.size() >= 1 && data.genre.size() <= 60 &&
+        data.synopsis is string && data.synopsis.size() <= 3000 &&
+        data.status is string && data.status in ['draft', 'confirmed'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Character
+    function isValidCharacter(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'name', 'role', 'affiliation',
+          'appearance', 'personality', 'background', 'abilities',
+          'status', 'linkedEpisodeIds', 'linkedWorldbuildingIds', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'name', 'role', 'affiliation',
+          'appearance', 'personality', 'background', 'abilities',
+          'status', 'linkedEpisodeIds', 'linkedWorldbuildingIds', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 60 &&
+        data.affiliation is string && data.affiliation.size() <= 120 &&
+        data.appearance is string && data.appearance.size() <= 2000 &&
+        data.personality is string && data.personality.size() <= 2000 &&
+        data.background is string && data.background.size() <= 4000 &&
+        data.abilities is string && data.abilities.size() <= 2000 &&
+        data.status is string && data.status in ['draft', 'confirmed'] &&
+        isValidStringList(data.linkedEpisodeIds) &&
+        isValidStringList(data.linkedWorldbuildingIds) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: WorldbuildingItem
+    function isValidWorldbuilding(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'title', 'category', 'summary',
+          'content', 'rules', 'status', 'linkedCharacterIds', 'linkedEpisodeIds',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'title', 'category', 'summary',
+          'content', 'rules', 'status', 'linkedCharacterIds', 'linkedEpisodeIds',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+        data.summary is string && data.summary.size() <= 500 &&
+        data.content is string && data.content.size() <= 10000 &&
+        data.rules is string && data.rules.size() <= 3000 &&
+        data.status is string && data.status in ['draft', 'confirmed'] &&
+        isValidStringList(data.linkedCharacterIds) &&
+        isValidStringList(data.linkedEpisodeIds) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Episode
+    function isValidEpisode(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'episodeNumber', 'title', 'content',
+          'synopsis', 'authorNote', 'charCountWithSpaces', 'charCountWithoutSpaces',
+          'status', 'linkedCharacterIds', 'linkedWorldbuildingIds', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'episodeNumber', 'title', 'content',
+          'synopsis', 'authorNote', 'charCountWithSpaces', 'charCountWithoutSpaces',
+          'status', 'linkedCharacterIds', 'linkedWorldbuildingIds',
+          'latestRevisionId', 'contentHash', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.episodeNumber is int && data.episodeNumber >= 1 && data.episodeNumber <= 10000 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.content is string && data.content.size() <= 200000 &&
+        data.synopsis is string && data.synopsis.size() <= 2000 &&
+        data.authorNote is string && data.authorNote.size() <= 2000 &&
+        data.charCountWithSpaces is int && data.charCountWithSpaces >= 0 && data.charCountWithSpaces <= 200000 &&
+        data.charCountWithoutSpaces is int && data.charCountWithoutSpaces >= 0 && data.charCountWithoutSpaces <= 200000 &&
+        data.status is string && data.status in ['draft', 'review', 'confirmed'] &&
+        isValidStringList(data.linkedCharacterIds) &&
+        isValidStringList(data.linkedWorldbuildingIds) &&
+        (!('latestRevisionId' in data) || isValidOptionalId(data.latestRevisionId)) &&
+        (!('contentHash' in data) || (data.contentHash is string && data.contentHash.size() <= 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Revision
+    function isValidRevision(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'episodeId', 'episodeTitle',
+          'content', 'charCountWithSpaces', 'label', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'episodeId', 'episodeTitle',
+          'content', 'charCountWithSpaces', 'label', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        isValidId(data.episodeId) &&
+        data.episodeTitle is string && data.episodeTitle.size() >= 1 && data.episodeTitle.size() <= 150 &&
+        data.content is string && data.content.size() <= 200000 &&
+        data.charCountWithSpaces is int && data.charCountWithSpaces >= 0 && data.charCountWithSpaces <= 200000 &&
+        data.label is string && data.label.size() >= 1 && data.label.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: Scene (Phase 1.5)
+    function isValidScene(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'episodeId', 'sceneNumber', 'title',
+          'summary', 'location', 'pointOfViewCharacterId', 'eventIds',
+          'characterIds', 'foreshadowingIds', 'canonStatus', 'sourceRevisionId',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'episodeId', 'sceneNumber', 'title',
+          'summary', 'location', 'pointOfViewCharacterId', 'eventIds',
+          'characterIds', 'foreshadowingIds', 'canonStatus', 'sourceRevisionId',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        isValidId(data.episodeId) &&
+        data.sceneNumber is int && data.sceneNumber >= 1 && data.sceneNumber <= 1000 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.summary is string && data.summary.size() <= 2000 &&
+        data.location is string && data.location.size() <= 120 &&
+        isValidOptionalId(data.pointOfViewCharacterId) &&
+        isValidStringList(data.eventIds) &&
+        isValidStringList(data.characterIds) &&
+        isValidStringList(data.foreshadowingIds) &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Foreshadowing (Phase 1.5)
+    function isValidForeshadowing(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'title', 'description', 'cluePhase',
+          'canonStatus', 'plantedEpisodeId', 'plantedSceneId', 'resolvedEpisodeId',
+          'resolvedSceneId', 'relatedEventIds', 'relatedCharacterIds',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'title', 'description', 'cluePhase',
+          'canonStatus', 'plantedEpisodeId', 'plantedSceneId', 'resolvedEpisodeId',
+          'resolvedSceneId', 'relatedEventIds', 'relatedCharacterIds',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.description is string && data.description.size() <= 3000 &&
+        data.cluePhase is string && data.cluePhase in ['PLANTED', 'REINFORCED', 'RESOLVED', 'ABANDONED'] &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.plantedEpisodeId) &&
+        isValidOptionalId(data.plantedSceneId) &&
+        isValidOptionalId(data.resolvedEpisodeId) &&
+        isValidOptionalId(data.resolvedSceneId) &&
+        isValidStringList(data.relatedEventIds) &&
+        isValidStringList(data.relatedCharacterIds) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        isValidActorType(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: CharacterRelationship (Phase 1.5)
+    function isValidCharacterRelationship(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'sourceCharacterId', 'targetCharacterId',
+          'relationType', 'affinityScore', 'isDirectional', 'description',
+          'canonStatus', 'effectiveEpisodeId', 'effectiveEventId',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'sourceCharacterId', 'targetCharacterId',
+          'relationType', 'affinityScore', 'isDirectional', 'description',
+          'canonStatus', 'effectiveEpisodeId', 'effectiveEventId',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        isValidId(data.sourceCharacterId) &&
+        isValidId(data.targetCharacterId) &&
+        data.sourceCharacterId != data.targetCharacterId &&
+        data.relationType is string && data.relationType.size() >= 1 && data.relationType.size() <= 80 &&
+        data.affinityScore is int && data.affinityScore >= -100 && data.affinityScore <= 100 &&
+        data.isDirectional is bool &&
+        data.description is string && data.description.size() <= 2000 &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.effectiveEpisodeId) &&
+        isValidOptionalId(data.effectiveEventId) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        isValidActorType(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: TimelineEvent (Phase 1.5)
+    function isValidTimelineEvent(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'title', 'summary', 'inUniverseDate',
+          'chronologicalOrder', 'episodeId', 'sceneId', 'participantCharacterIds',
+          'linkedForeshadowingIds', 'linkedWorldbuildingIds', 'canonStatus',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'title', 'summary', 'inUniverseDate',
+          'chronologicalOrder', 'episodeId', 'sceneId', 'participantCharacterIds',
+          'linkedForeshadowingIds', 'linkedWorldbuildingIds', 'canonStatus',
+          'sourceRevisionId', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.summary is string && data.summary.size() <= 3000 &&
+        data.inUniverseDate is string && data.inUniverseDate.size() <= 100 &&
+        data.chronologicalOrder is int && data.chronologicalOrder >= -100000 && data.chronologicalOrder <= 100000 &&
+        isValidOptionalId(data.episodeId) &&
+        isValidOptionalId(data.sceneId) &&
+        isValidStringList(data.participantCharacterIds) &&
+        isValidStringList(data.linkedForeshadowingIds) &&
+        isValidStringList(data.linkedWorldbuildingIds) &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        isValidActorType(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: MemoryDocument (Phase 1.5)
+    function isValidMemoryDocument(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'sourceEntityType', 'sourceEntityId',
+          'sourceRevisionId', 'title', 'fullText', 'chunkCount', 'canonStatus',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'sourceEntityType', 'sourceEntityId',
+          'sourceRevisionId', 'title', 'fullText', 'chunkCount', 'canonStatus',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.sourceEntityType is string && data.sourceEntityType in [
+          'EPISODE', 'SCENE', 'CHARACTER', 'WORLDBUILDING', 'TIMELINE_EVENT', 'FORESHADOWING', 'RELATIONSHIP'
+        ] &&
+        isValidId(data.sourceEntityId) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.fullText is string && data.fullText.size() <= 200000 &&
+        data.chunkCount is int && data.chunkCount >= 0 && data.chunkCount <= 500 &&
+        isValidCanonStatus(data.canonStatus) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: MemoryChunk (Phase 1.5)
+    function isValidMemoryChunk(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'documentId', 'sourceEntityType',
+          'sourceEntityId', 'sourceRevisionId', 'chunkIndex', 'content',
+          'tokenEstimate', 'keywords', 'episodeId', 'sceneId', 'characterIds',
+          'foreshadowingIds', 'canonStatus', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'documentId', 'sourceEntityType',
+          'sourceEntityId', 'sourceRevisionId', 'chunkIndex', 'content',
+          'tokenEstimate', 'keywords', 'episodeId', 'sceneId', 'characterIds',
+          'foreshadowingIds', 'canonStatus', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        isValidId(data.documentId) &&
+        data.sourceEntityType is string && data.sourceEntityType in [
+          'EPISODE', 'SCENE', 'CHARACTER', 'WORLDBUILDING', 'TIMELINE_EVENT', 'FORESHADOWING', 'RELATIONSHIP'
+        ] &&
+        isValidId(data.sourceEntityId) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex <= 500 &&
+        data.content is string && data.content.size() >= 1 && data.content.size() <= 4000 &&
+        data.tokenEstimate is int && data.tokenEstimate >= 0 && data.tokenEstimate <= 8000 &&
+        isValidStringList(data.keywords) &&
+        isValidOptionalId(data.episodeId) &&
+        isValidOptionalId(data.sceneId) &&
+        isValidStringList(data.characterIds) &&
+        isValidStringList(data.foreshadowingIds) &&
+        isValidCanonStatus(data.canonStatus) &&
+        data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: StyleProfile (Phase 1.5)
+    function isValidStyleProfile(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'name', 'narrativePerspective',
+          'dialogueRatio', 'avgSentenceLength', 'toneKeywords',
+          'preferredExpressions', 'prohibitedExpressions', 'sampleExcerpt',
+          'canonStatus', 'sourceRevisionId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'name', 'narrativePerspective',
+          'dialogueRatio', 'avgSentenceLength', 'toneKeywords',
+          'preferredExpressions', 'prohibitedExpressions', 'sampleExcerpt',
+          'canonStatus', 'sourceRevisionId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.narrativePerspective is string && data.narrativePerspective in [
+          'FIRST_PERSON', 'THIRD_LIMITED', 'OMNISCIENT', 'MIXED'
+        ] &&
+        data.dialogueRatio is int && data.dialogueRatio >= 0 && data.dialogueRatio <= 100 &&
+        data.avgSentenceLength is int && data.avgSentenceLength >= 0 && data.avgSentenceLength <= 1000 &&
+        isValidStringList(data.toneKeywords) &&
+        isValidStringList(data.preferredExpressions) &&
+        isValidStringList(data.prohibitedExpressions) &&
+        data.sampleExcerpt is string && data.sampleExcerpt.size() <= 3000 &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ChangeProposal (Phase 1.5)
+    function isValidChangeProposal(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'targetEntityType', 'targetEntityId',
+          'proposedAction', 'title', 'rationale', 'beforeSummary', 'afterSummary',
+          'proposedPayloadJson', 'canonStatus', 'triggerEpisodeId',
+          'triggerSceneId', 'sourceRevisionId', 'createdBy', 'reviewedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'targetEntityType', 'targetEntityId',
+          'proposedAction', 'title', 'rationale', 'beforeSummary', 'afterSummary',
+          'proposedPayloadJson', 'canonStatus', 'triggerEpisodeId',
+          'triggerSceneId', 'sourceRevisionId', 'createdBy', 'reviewedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.targetEntityType is string && data.targetEntityType in [
+          'CHARACTER', 'WORLDBUILDING', 'EPISODE', 'SCENE',
+          'FORESHADOWING', 'RELATIONSHIP', 'TIMELINE_EVENT', 'STYLE_PROFILE'
+        ] &&
+        isValidId(data.targetEntityId) &&
+        data.proposedAction is string && data.proposedAction in ['CREATE', 'UPDATE', 'ARCHIVE'] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.rationale is string && data.rationale.size() <= 2000 &&
+        data.beforeSummary is string && data.beforeSummary.size() <= 2000 &&
+        data.afterSummary is string && data.afterSummary.size() <= 2000 &&
+        data.proposedPayloadJson is string && data.proposedPayloadJson.size() <= 20000 &&
+        isValidCanonStatus(data.canonStatus) &&
+        isValidOptionalId(data.triggerEpisodeId) &&
+        isValidOptionalId(data.triggerSceneId) &&
+        isValidOptionalId(data.sourceRevisionId) &&
+        isValidActorType(data.createdBy) &&
+        data.reviewedAt is string && data.reviewedAt.size() <= 64 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: WritingPromptProfile (Phase 2)
+    function isValidWritingPromptProfile(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'promptType', 'title', 'description',
+          'targetCharacterId', 'content', 'isActive', 'currentVersionId',
+          'currentVersionNumber', 'versions', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'promptType', 'title', 'description',
+          'targetCharacterId', 'content', 'isActive', 'currentVersionId',
+          'currentVersionNumber', 'versions', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        data.promptType is string && data.promptType in [
+          'CORE_WRITING_RULES', 'PROJECT_STYLE_PROFILE',
+          'CHARACTER_DIALOGUE_RULES', 'SCENE_INSTRUCTIONS', 'REVIEW_RULES'
+        ] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.description is string && data.description.size() <= 1000 &&
+        isValidOptionalId(data.targetCharacterId) &&
+        data.content is string && data.content.size() <= 100000 &&
+        data.isActive is bool &&
+        isValidId(data.currentVersionId) &&
+        data.currentVersionNumber is int && data.currentVersionNumber >= 1 && data.currentVersionNumber <= 10000 &&
+        data.versions is list && data.versions.size() >= 1 && data.versions.size() <= 30 && data.versions[0] is map &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: WritingPlan (Phase 2)
+    function isValidWritingPlan(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'projectId', 'episodeId', 'episodeTitle',
+          'episodeGoal', 'requiredEvents', 'forbiddenDevelopments',
+          'targetTotalCharCount', 'narrativePerspective', 'scenes',
+          'plotDeviationWarnings', 'appliedPromptVersionIds',
+          'referencedSourceIds', 'modelId', 'status', 'approvedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'projectId', 'episodeId', 'episodeTitle',
+          'episodeGoal', 'requiredEvents', 'forbiddenDevelopments',
+          'targetTotalCharCount', 'narrativePerspective', 'scenes',
+          'plotDeviationWarnings', 'appliedPromptVersionIds',
+          'referencedSourceIds', 'modelId', 'status', 'approvedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.projectId) &&
+        isValidId(data.episodeId) &&
+        data.episodeTitle is string && data.episodeTitle.size() >= 1 && data.episodeTitle.size() <= 200 &&
+        data.episodeGoal is string && data.episodeGoal.size() >= 1 && data.episodeGoal.size() <= 2000 &&
+        isValidStringList(data.requiredEvents) &&
+        isValidStringList(data.forbiddenDevelopments) &&
+        data.targetTotalCharCount is int && data.targetTotalCharCount >= 100 && data.targetTotalCharCount <= 100000 &&
+        data.narrativePerspective is string && data.narrativePerspective in [
+          'FIRST_PERSON', 'THIRD_LIMITED', 'OMNISCIENT', 'MIXED'
+        ] &&
+        data.scenes is list && data.scenes.size() >= 1 && data.scenes.size() <= 30 && data.scenes[0] is map &&
+        isValidStringList(data.plotDeviationWarnings) &&
+        isValidStringList(data.appliedPromptVersionIds) &&
+        isValidStringList(data.referencedSourceIds) &&
+        data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 80 &&
+        data.status is string && data.status in ['DRAFT_PLAN', 'APPROVED', 'SUPERSEDED'] &&
+        data.approvedAt is string && data.approvedAt.size() <= 64 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Projects Collection
+    match /users/{uid}/projects/{projectId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && existing().ownerId == request.auth.uid;
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) &&
+        isValidProject(incoming()) &&
+        incoming().id == projectId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) &&
+        isValidProject(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'genre', 'synopsis', 'status', 'updatedAt'])
+        );
+      allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) &&
+        existing().ownerId == request.auth.uid;
+
+      // Characters Subcollection
+      match /characters/{characterId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(characterId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(characterId) &&
+          isValidCharacter(incoming()) &&
+          incoming().id == characterId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(characterId) &&
+          isValidCharacter(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'role', 'affiliation', 'appearance', 'personality',
+              'background', 'abilities', 'status', 'linkedEpisodeIds',
+              'linkedWorldbuildingIds', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(characterId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // Worldbuilding Subcollection
+      match /worldbuilding/{itemId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(itemId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(itemId) &&
+          isValidWorldbuilding(incoming()) &&
+          incoming().id == itemId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(itemId) &&
+          isValidWorldbuilding(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'category', 'summary', 'content', 'rules',
+              'status', 'linkedCharacterIds', 'linkedEpisodeIds', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(itemId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // Episodes Subcollection
+      match /episodes/{episodeId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(episodeId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(episodeId) &&
+          isValidEpisode(incoming()) &&
+          incoming().id == episodeId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(episodeId) &&
+          isValidEpisode(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'episodeNumber', 'title', 'content', 'synopsis', 'authorNote',
+              'charCountWithSpaces', 'charCountWithoutSpaces', 'status',
+              'linkedCharacterIds', 'linkedWorldbuildingIds',
+              'latestRevisionId', 'contentHash', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(episodeId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // Revisions Subcollection (Immutable snapshots; only create, read, delete allowed)
+      match /revisions/{revisionId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(revisionId) &&
+          isParentProjectOwner(uid, projectId) &&
+          (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(revisionId) &&
+          isValidRevision(incoming()) &&
+          incoming().id == revisionId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          isParentProjectOwner(uid, projectId) &&
+          exists(/databases/$(database)/documents/users/$(uid)/projects/$(projectId)/episodes/$(incoming().episodeId));
+        allow update: if false;
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(revisionId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // Scenes Subcollection (Phase 1.5)
+      match /scenes/{sceneId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(sceneId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(sceneId) &&
+          isValidScene(incoming()) &&
+          incoming().id == sceneId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(sceneId) &&
+          isValidScene(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'episodeId', 'sceneNumber', 'title', 'summary', 'location',
+              'pointOfViewCharacterId', 'eventIds', 'characterIds',
+              'foreshadowingIds', 'canonStatus', 'sourceRevisionId', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(sceneId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // Foreshadowings Subcollection (Phase 1.5)
+      match /foreshadowings/{foreshadowingId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(foreshadowingId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(foreshadowingId) &&
+          isValidForeshadowing(incoming()) &&
+          incoming().id == foreshadowingId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(foreshadowingId) &&
+          isValidForeshadowing(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'cluePhase', 'canonStatus',
+              'plantedEpisodeId', 'plantedSceneId', 'resolvedEpisodeId',
+              'resolvedSceneId', 'relatedEventIds', 'relatedCharacterIds',
+              'sourceRevisionId', 'createdBy', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(foreshadowingId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // CharacterRelationships Subcollection (Phase 1.5)
+      match /relationships/{relationshipId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(relationshipId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(relationshipId) &&
+          isValidCharacterRelationship(incoming()) &&
+          incoming().id == relationshipId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(relationshipId) &&
+          isValidCharacterRelationship(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'sourceCharacterId', 'targetCharacterId', 'relationType',
+              'affinityScore', 'isDirectional', 'description', 'canonStatus',
+              'effectiveEpisodeId', 'effectiveEventId', 'sourceRevisionId',
+              'createdBy', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(relationshipId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // TimelineEvents Subcollection (Phase 1.5)
+      match /timelineEvents/{eventId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(eventId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(eventId) &&
+          isValidTimelineEvent(incoming()) &&
+          incoming().id == eventId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(eventId) &&
+          isValidTimelineEvent(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'summary', 'inUniverseDate', 'chronologicalOrder',
+              'episodeId', 'sceneId', 'participantCharacterIds',
+              'linkedForeshadowingIds', 'linkedWorldbuildingIds',
+              'canonStatus', 'sourceRevisionId', 'createdBy', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(eventId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // MemoryDocuments Subcollection (Phase 1.5)
+      match /memoryDocuments/{documentId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(documentId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(documentId) &&
+          isValidMemoryDocument(incoming()) &&
+          incoming().id == documentId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(documentId) &&
+          isValidMemoryDocument(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'sourceEntityType', 'sourceEntityId', 'sourceRevisionId',
+              'title', 'fullText', 'chunkCount', 'canonStatus', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(documentId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // MemoryChunks Subcollection (Phase 1.5 — Immutable indexed chunks; create, read, delete allowed)
+      match /memoryChunks/{chunkId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(chunkId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(chunkId) &&
+          isValidMemoryChunk(incoming()) &&
+          incoming().id == chunkId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if false;
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(chunkId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // StyleProfiles Subcollection (Phase 1.5 & Phase 4.3C Stage 1.1 Atomic Persistence)
+      match /styleProfiles/{profileId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isParentProjectOwner(uid, projectId) &&
+          (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isValidStyleProfile(incoming()) &&
+          incoming().id == profileId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isValidStyleProfile(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'narrativePerspective', 'dialogueRatio', 'avgSentenceLength',
+              'toneKeywords', 'preferredExpressions', 'prohibitedExpressions',
+              'sampleExcerpt', 'canonStatus', 'sourceRevisionId', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // ChangeProposals Subcollection (Phase 1.5, Phase 4.2.2 Stage 1.5, & Phase 4.3B Stage 2.1 Atomic Create-Only)
+      match /changeProposals/{proposalId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(proposalId) &&
+          isParentProjectOwner(uid, projectId) &&
+          (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(proposalId) &&
+          isValidChangeProposal(incoming()) &&
+          incoming().canonStatus == 'PROPOSED' &&
+          incoming().id == proposalId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(proposalId) &&
+          isValidChangeProposal(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) &&
+          // Phase 4.2.2 Stage 1.5: Once a proposal is decided (CANON, REJECTED, ARCHIVED),
+          // client SDK cannot modify any of its fields or revert its status.
+          existing().canonStatus == 'PROPOSED' &&
+          !(existing().canonStatus in ['CANON', 'REJECTED', 'ARCHIVED']) &&
+          // Phase 4.2.2 Stage 1.5: Client SDK cannot tamper with the verified extraction payload envelope.
+          incoming().proposedPayloadJson == existing().proposedPayloadJson &&
+          // Phase 4.2.2 Stage 1.5: Client SDK cannot directly transition RELATIONSHIP, TIMELINE_EVENT, or FORESHADOWING
+          // proposals from PROPOSED to CANON, REJECTED, or ARCHIVED (must go through server atomic approval/rejection engine).
+          !(
+            existing().targetEntityType in ['RELATIONSHIP', 'TIMELINE_EVENT', 'FORESHADOWING'] &&
+            (
+              incoming().canonStatus == 'CANON' ||
+              incoming().canonStatus == 'REJECTED' ||
+              incoming().canonStatus != existing().canonStatus
+            )
+          ) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'rationale', 'beforeSummary', 'afterSummary',
+              'canonStatus', 'reviewedAt', 'updatedAt'
+            ])
+          );
+        // Decided proposals (CANON, REJECTED, ARCHIVED) cannot be deleted by client SDK to preserve audit trail.
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(proposalId) &&
+          existing().ownerId == request.auth.uid &&
+          existing().canonStatus == 'PROPOSED' &&
+          !(existing().canonStatus in ['CANON', 'REJECTED', 'ARCHIVED']) &&
+          isParentProjectOwner(uid, projectId);
+      }
+
+      // ChangeProposalApprovalAudits Subcollection (Phase 4.2.2 — Server Admin SDK Write-Only)
+      match /changeProposalApprovalAudits/{auditId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(auditId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // RagSyncTasks Subcollection (Phase 4.2.2 Stage 2B — Server Admin SDK Outbox Write-Only)
+      match /ragSyncTasks/{taskId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(taskId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // RagGenerationStaging Subcollection (Phase 4.2.2 Stage 2.5C — Server Admin SDK Write-Only)
+      match /ragGenerationStaging/{stagingId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(stagingId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // WritingPromptProfiles Subcollection (Phase 2 & Phase 4.3C Stage 1.1 Atomic CAS)
+      match /writingPromptProfiles/{profileId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isParentProjectOwner(uid, projectId) &&
+          (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isValidWritingPromptProfile(incoming()) &&
+          incoming().id == profileId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          isValidWritingPromptProfile(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'promptType', 'title', 'description', 'targetCharacterId',
+              'content', 'isActive', 'currentVersionId',
+              'currentVersionNumber', 'versions', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+
+      // WritingPlans Subcollection (Phase 2)
+      match /writingPlans/{planId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(planId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+        allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(planId) &&
+          isValidWritingPlan(incoming()) &&
+          incoming().id == planId &&
+          incoming().projectId == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId);
+        allow update: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(planId) &&
+          isValidWritingPlan(incoming()) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().projectId == existing().projectId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentProjectOwner(uid, projectId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'episodeTitle', 'episodeGoal', 'requiredEvents',
+              'forbiddenDevelopments', 'targetTotalCharCount',
+              'narrativePerspective', 'scenes', 'plotDeviationWarnings',
+              'appliedPromptVersionIds', 'referencedSourceIds',
+              'status', 'approvedAt', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(planId) &&
+          existing().ownerId == request.auth.uid && isParentProjectOwner(uid, projectId);
+      }
+    }
+  }
+}

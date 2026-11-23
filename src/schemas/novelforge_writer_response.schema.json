@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "description": "Novel Writer 단독 호출 응답. 독립 검수 실행 상태와 승인 여부는 AI가 결정하지 않으며 서버가 관리한다.",
+  "properties": {
+    "manuscript_state": {
+      "type": "string",
+      "enum": [
+        "BLOCKED_CONFLICT",
+        "BLOCKED_MISSING_INFO",
+        "DRAFT_READY"
+      ]
+    },
+    "manuscript": {
+      "type": "string",
+      "description": "순수 소설 원고; 생성 전 BLOCKED 상태에서만 빈 문자열. 생성된 초안은 서버에 별도 저장"
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "INFO",
+              "WARNING",
+              "CRITICAL_BLOCK"
+            ]
+          },
+          "manuscript_location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "문제와 연결된 실제 원고 위치. 집필 전 보류이거나 위치를 확인할 수 없으면 null"
+          },
+          "reference_lore_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "실제 제공된 확정 설정·연표의 출처 ID만 허용; 미존재·무관할 경우 null"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "manuscript_location",
+          "reference_lore_id",
+          "description"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "resolution_type": {
+            "type": "string",
+            "enum": [
+              "ONE_TIME_EXCEPTION",
+              "PERMANENT_LORE_UPDATE",
+              "CANON_PROMOTION",
+              "TEXT_REVISION"
+            ]
+          },
+          "target_location_or_lore_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "실재하는 원고 위치 또는 출처 ID. 대상 없음/미확인 시 null"
+          },
+          "proposed_change": {
+            "type": "string"
+          },
+          "impact_analysis": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "resolution_type",
+          "target_location_or_lore_id",
+          "proposed_change",
+          "impact_analysis"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "manuscript_state",
+    "manuscript",
+    "issues",
+    "proposals"
+  ],
+  "additionalProperties": false
+}

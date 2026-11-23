@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LiteraryRewriteCandidateOutput",
+  "description": "Structured Gemini response schema for Phase 4.3B selective literary rewriting (R1-R6) with strict anchor preservation and CANON/POV safety checks.",
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["REWRITTEN", "NO_OP_OPTIMAL"],
+      "description": "Return REWRITTEN when improving the excerpt, or NO_OP_OPTIMAL when the existing prose is already optimal and changing it risks voice or canon damage."
+    },
+    "appliedModes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["R1", "R2", "R3", "R4", "R5", "R6"]
+      },
+      "description": "Rewriting modes actually applied."
+    },
+    "rewrittenExcerpt": {
+      "type": "string",
+      "description": "Pure Korean novel prose for the selected excerpt only (or exact originalExcerpt if decision is NO_OP_OPTIMAL). Never rewrite unselected regions or insert meta markers."
+    },
+    "changeRationale": {
+      "type": "string",
+      "description": "Concrete literary explanation in Korean describing why the prose was improved or preserved."
+    },
+    "preservedElements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of story facts, canon constraints, POV rules, and character voice traits preserved."
+    },
+    "noOpReason": {
+      "type": ["string", "null"],
+      "description": "Reason in Korean when decision is NO_OP_OPTIMAL; null otherwise."
+    },
+    "canonConflictAlerts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["INFO", "WARNING", "CRITICAL_BLOCK"]
+          },
+          "referenceLoreId": {
+            "type": ["string", "null"]
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": ["severity", "referenceLoreId", "description"],
+        "additionalProperties": false
+      }
+    },
+    "perspectiveCheck": {
+      "type": "object",
+      "properties": {
+        "expectedPerspective": {
+          "type": "string",
+          "enum": ["FIRST_PERSON", "THIRD_LIMITED", "OMNISCIENT", "MIXED"]
+        },
+        "maintained": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": ["expectedPerspective", "maintained", "note"],
+      "additionalProperties": false
+    },
+    "characterVoiceNotes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "candidateLoreProposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "targetEntityType": {
+            "type": "string",
+            "enum": ["CHARACTER", "WORLDBUILDING", "FORESHADOWING", "TIMELINE_EVENT"]
+          },
+          "proposedAction": {
+            "type": "string",
+            "enum": ["CREATE", "UPDATE"]
+          },
+          "title": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "beforeSummary": {
+            "type": "string"
+          },
+          "afterSummary": {
+            "type": "string"
+          },
+          "referenceLoreId": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "targetEntityType",
+          "proposedAction",
+          "title",
+          "rationale",
+          "beforeSummary",
+          "afterSummary",
+          "referenceLoreId"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Optional permanent lore change suggestions only (will enter PROPOSED status; never auto-promoted to CANON)."
+    }
+  },
+  "required": [
+    "decision",
+    "appliedModes",
+    "rewrittenExcerpt",
+    "changeRationale",
+    "preservedElements",
+    "noOpReason",
+    "canonConflictAlerts",
+    "perspectiveCheck",
+    "characterVoiceNotes",
+    "candidateLoreProposals"
+  ],
+  "additionalProperties": false
+}

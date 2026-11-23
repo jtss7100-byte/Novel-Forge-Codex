@@ -1,0 +1,1928 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A long-form fantasy web novel project owned by an author.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique project identifier."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the project owner."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Title of the fantasy web novel."
+        },
+        "genre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Sub-genre of the fantasy web novel."
+        },
+        "synopsis": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000,
+          "description": "Project logline and synopsis."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "confirmed"],
+          "description": "Editorial status of the project."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last modified timestamp."
+        }
+      },
+      "required": ["id", "ownerId", "title", "genre", "synopsis", "status", "createdAt", "updatedAt"]
+    },
+    "Character": {
+      "title": "Character",
+      "description": "A character profile belonging to a novel project.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "affiliation": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "appearance": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "personality": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "background": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "abilities": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "confirmed"]
+        },
+        "linkedEpisodeIds": {
+          "type": "array",
+          "description": "List of linked episode IDs (max 50)."
+        },
+        "linkedWorldbuildingIds": {
+          "type": "array",
+          "description": "List of linked worldbuilding setting IDs (max 50)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "name",
+        "role",
+        "affiliation",
+        "appearance",
+        "personality",
+        "background",
+        "abilities",
+        "status",
+        "linkedEpisodeIds",
+        "linkedWorldbuildingIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WorldbuildingItem": {
+      "title": "WorldbuildingItem",
+      "description": "A worldbuilding lore or rule setting belonging to a novel project.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "content": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 10000
+        },
+        "rules": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "confirmed"]
+        },
+        "linkedCharacterIds": {
+          "type": "array",
+          "description": "List of linked character IDs (max 50)."
+        },
+        "linkedEpisodeIds": {
+          "type": "array",
+          "description": "List of linked episode IDs (max 50)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "title",
+        "category",
+        "summary",
+        "content",
+        "rules",
+        "status",
+        "linkedCharacterIds",
+        "linkedEpisodeIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Episode": {
+      "title": "Episode",
+      "description": "A single episode manuscript belonging to a novel project.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeNumber": {
+          "type": "number",
+          "description": "Episode sequence number (1 to 10000)."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "content": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200000
+        },
+        "synopsis": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "authorNote": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "charCountWithSpaces": {
+          "type": "number"
+        },
+        "charCountWithoutSpaces": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "review", "confirmed"]
+        },
+        "linkedCharacterIds": {
+          "type": "array"
+        },
+        "linkedWorldbuildingIds": {
+          "type": "array"
+        },
+        "latestRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "episodeNumber",
+        "title",
+        "content",
+        "synopsis",
+        "authorNote",
+        "charCountWithSpaces",
+        "charCountWithoutSpaces",
+        "status",
+        "linkedCharacterIds",
+        "linkedWorldbuildingIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Revision": {
+      "title": "Revision",
+      "description": "An immutable manuscript snapshot for version recovery.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "content": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200000
+        },
+        "charCountWithSpaces": {
+          "type": "number"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "episodeId",
+        "episodeTitle",
+        "content",
+        "charCountWithSpaces",
+        "label",
+        "createdAt"
+      ]
+    },
+    "Scene": {
+      "title": "Scene",
+      "description": "A narrative scene inside an episode linking events, characters, and foreshadowings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sceneNumber": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "location": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "pointOfViewCharacterId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "eventIds": {
+          "type": "array"
+        },
+        "characterIds": {
+          "type": "array"
+        },
+        "foreshadowingIds": {
+          "type": "array"
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "episodeId",
+        "sceneNumber",
+        "title",
+        "summary",
+        "location",
+        "pointOfViewCharacterId",
+        "eventIds",
+        "characterIds",
+        "foreshadowingIds",
+        "canonStatus",
+        "sourceRevisionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Foreshadowing": {
+      "title": "Foreshadowing",
+      "description": "A narrative clue or foreshadowing item tracked across episodes, scenes, events, and characters.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "cluePhase": {
+          "type": "string",
+          "enum": ["PLANTED", "REINFORCED", "RESOLVED", "ABANDONED"]
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "plantedEpisodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "plantedSceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "resolvedEpisodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "resolvedSceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "relatedEventIds": {
+          "type": "array"
+        },
+        "relatedCharacterIds": {
+          "type": "array"
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdBy": {
+          "type": "string",
+          "enum": ["AUTHOR", "AI_ENGINE", "SYSTEM"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "title",
+        "description",
+        "cluePhase",
+        "canonStatus",
+        "plantedEpisodeId",
+        "plantedSceneId",
+        "resolvedEpisodeId",
+        "resolvedSceneId",
+        "relatedEventIds",
+        "relatedCharacterIds",
+        "sourceRevisionId",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CharacterRelationship": {
+      "title": "CharacterRelationship",
+      "description": "A relationship between two characters in a project.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceCharacterId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetCharacterId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "relationType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "affinityScore": {
+          "type": "number"
+        },
+        "isDirectional": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "effectiveEpisodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "effectiveEventId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdBy": {
+          "type": "string",
+          "enum": ["AUTHOR", "AI_ENGINE", "SYSTEM"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "sourceCharacterId",
+        "targetCharacterId",
+        "relationType",
+        "affinityScore",
+        "isDirectional",
+        "description",
+        "canonStatus",
+        "effectiveEpisodeId",
+        "effectiveEventId",
+        "sourceRevisionId",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TimelineEvent": {
+      "title": "TimelineEvent",
+      "description": "A chronological story event connected to episodes, scenes, characters, and foreshadowings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "inUniverseDate": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "chronologicalOrder": {
+          "type": "number"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "participantCharacterIds": {
+          "type": "array"
+        },
+        "linkedForeshadowingIds": {
+          "type": "array"
+        },
+        "linkedWorldbuildingIds": {
+          "type": "array"
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdBy": {
+          "type": "string",
+          "enum": ["AUTHOR", "AI_ENGINE", "SYSTEM"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "title",
+        "summary",
+        "inUniverseDate",
+        "chronologicalOrder",
+        "episodeId",
+        "sceneId",
+        "participantCharacterIds",
+        "linkedForeshadowingIds",
+        "linkedWorldbuildingIds",
+        "canonStatus",
+        "sourceRevisionId",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemoryDocument": {
+      "title": "MemoryDocument",
+      "description": "A long-term memory document indexed for RAG retrieval.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceEntityType": {
+          "type": "string",
+          "enum": ["EPISODE", "SCENE", "CHARACTER", "WORLDBUILDING", "TIMELINE_EVENT", "FORESHADOWING", "RELATIONSHIP"]
+        },
+        "sourceEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "fullText": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200000
+        },
+        "chunkCount": {
+          "type": "number"
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "sourceEntityType",
+        "sourceEntityId",
+        "sourceRevisionId",
+        "title",
+        "fullText",
+        "chunkCount",
+        "canonStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemoryChunk": {
+      "title": "MemoryChunk",
+      "description": "A text chunk belonging to a MemoryDocument for RAG retrieval.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "documentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceEntityType": {
+          "type": "string",
+          "enum": ["EPISODE", "SCENE", "CHARACTER", "WORLDBUILDING", "TIMELINE_EVENT", "FORESHADOWING", "RELATIONSHIP"]
+        },
+        "sourceEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "chunkIndex": {
+          "type": "number"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "tokenEstimate": {
+          "type": "number"
+        },
+        "keywords": {
+          "type": "array"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "characterIds": {
+          "type": "array"
+        },
+        "foreshadowingIds": {
+          "type": "array"
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "documentId",
+        "sourceEntityType",
+        "sourceEntityId",
+        "sourceRevisionId",
+        "chunkIndex",
+        "content",
+        "tokenEstimate",
+        "keywords",
+        "episodeId",
+        "sceneId",
+        "characterIds",
+        "foreshadowingIds",
+        "canonStatus",
+        "createdAt"
+      ]
+    },
+    "StyleProfile": {
+      "title": "StyleProfile",
+      "description": "An author or project narrative style profile for AI writing consistency.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "narrativePerspective": {
+          "type": "string",
+          "enum": ["FIRST_PERSON", "THIRD_LIMITED", "OMNISCIENT", "MIXED"]
+        },
+        "dialogueRatio": {
+          "type": "number"
+        },
+        "avgSentenceLength": {
+          "type": "number"
+        },
+        "toneKeywords": {
+          "type": "array"
+        },
+        "preferredExpressions": {
+          "type": "array"
+        },
+        "prohibitedExpressions": {
+          "type": "array"
+        },
+        "sampleExcerpt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "name",
+        "narrativePerspective",
+        "dialogueRatio",
+        "avgSentenceLength",
+        "toneKeywords",
+        "preferredExpressions",
+        "prohibitedExpressions",
+        "sampleExcerpt",
+        "canonStatus",
+        "sourceRevisionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChangeProposal": {
+      "title": "ChangeProposal",
+      "description": "An AI-proposed modification to a canon or draft setting awaiting author approval.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetEntityType": {
+          "type": "string",
+          "enum": [
+            "CHARACTER",
+            "WORLDBUILDING",
+            "EPISODE",
+            "SCENE",
+            "FORESHADOWING",
+            "RELATIONSHIP",
+            "TIMELINE_EVENT",
+            "STYLE_PROFILE"
+          ]
+        },
+        "targetEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "proposedAction": {
+          "type": "string",
+          "enum": ["CREATE", "UPDATE", "ARCHIVE"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "beforeSummary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "afterSummary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "proposedPayloadJson": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 20000
+        },
+        "canonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "triggerEpisodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "triggerSceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdBy": {
+          "type": "string",
+          "enum": ["AUTHOR", "AI_ENGINE", "SYSTEM"]
+        },
+        "reviewedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "targetEntityType",
+        "targetEntityId",
+        "proposedAction",
+        "title",
+        "rationale",
+        "beforeSummary",
+        "afterSummary",
+        "proposedPayloadJson",
+        "canonStatus",
+        "triggerEpisodeId",
+        "triggerSceneId",
+        "sourceRevisionId",
+        "createdBy",
+        "reviewedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WritingPromptProfile": {
+      "title": "WritingPromptProfile",
+      "description": "A versioned AI writing prompt template belonging to a project (Core Writing Rules, Style Profile, Dialogue Rules, Scene Instructions, Review Rules).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "promptType": {
+          "type": "string",
+          "enum": [
+            "CORE_WRITING_RULES",
+            "PROJECT_STYLE_PROFILE",
+            "CHARACTER_DIALOGUE_RULES",
+            "SCENE_INSTRUCTIONS",
+            "REVIEW_RULES"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "targetCharacterId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "content": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 100000
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "currentVersionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "currentVersionNumber": {
+          "type": "number"
+        },
+        "versions": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "promptType",
+        "title",
+        "description",
+        "targetCharacterId",
+        "content",
+        "isActive",
+        "currentVersionId",
+        "currentVersionNumber",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WritingPlan": {
+      "title": "WritingPlan",
+      "description": "An author-approved or draft AI scene plan for an episode.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "episodeTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "episodeGoal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "requiredEvents": {
+          "type": "array"
+        },
+        "forbiddenDevelopments": {
+          "type": "array"
+        },
+        "targetTotalCharCount": {
+          "type": "number"
+        },
+        "narrativePerspective": {
+          "type": "string",
+          "enum": ["FIRST_PERSON", "THIRD_LIMITED", "OMNISCIENT", "MIXED"]
+        },
+        "scenes": {
+          "type": "array"
+        },
+        "plotDeviationWarnings": {
+          "type": "array"
+        },
+        "appliedPromptVersionIds": {
+          "type": "array"
+        },
+        "referencedSourceIds": {
+          "type": "array"
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["DRAFT_PLAN", "APPROVED", "SUPERSEDED"]
+        },
+        "approvedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "episodeId",
+        "episodeTitle",
+        "episodeGoal",
+        "requiredEvents",
+        "forbiddenDevelopments",
+        "targetTotalCharCount",
+        "narrativePerspective",
+        "scenes",
+        "plotDeviationWarnings",
+        "appliedPromptVersionIds",
+        "referencedSourceIds",
+        "modelId",
+        "status",
+        "approvedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChangeProposalApprovalAudit": {
+      "title": "ChangeProposalApprovalAudit",
+      "description": "Immutable audit record created by the server Admin SDK when an author approves or rejects a ChangeProposal.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "proposalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "decision": {
+          "type": "string",
+          "enum": ["APPROVED", "REJECTED"]
+        },
+        "targetEntityType": {
+          "type": "string",
+          "enum": ["RELATIONSHIP", "TIMELINE_EVENT", "FORESHADOWING"]
+        },
+        "targetEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "proposedAction": {
+          "type": "string",
+          "enum": ["CREATE", "UPDATE"]
+        },
+        "triggerEpisodeId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "sourceSceneId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "proposalFingerprint": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "reviewerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reviewNote": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "beforeCanonStatus": {
+          "type": "string",
+          "enum": ["DRAFT", "PROPOSED", "CANON", "REJECTED", "ARCHIVED"]
+        },
+        "afterCanonStatus": {
+          "type": "string",
+          "enum": ["CANON", "REJECTED"]
+        },
+        "beforeSnapshotJson": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 25000
+        },
+        "afterSnapshotJson": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 25000
+        },
+        "verifiedExcerptJson": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 10000
+        },
+        "payoffNote": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "ragSyncStatus": {
+          "type": "string",
+          "enum": ["PENDING", "PROCESSING", "SYNCED", "FAILED", "SUPERSEDED", "NOT_REQUIRED"]
+        },
+        "ragSyncError": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "proposalId",
+        "decision",
+        "targetEntityType",
+        "targetEntityId",
+        "proposedAction",
+        "sourceRevisionId",
+        "reviewerUid",
+        "reviewNote",
+        "afterCanonStatus",
+        "beforeSnapshotJson",
+        "afterSnapshotJson",
+        "verifiedExcerptJson",
+        "ragSyncStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RagSyncTask": {
+      "title": "RagSyncTask",
+      "description": "Server-side outbox task for post-commit RAG synchronization of approved CANON entities.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "proposalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "auditId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "targetEntityType": {
+          "type": "string",
+          "enum": ["RELATIONSHIP", "TIMELINE_EVENT", "FORESHADOWING"]
+        },
+        "targetEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "expectedSourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "expectedEntityUpdatedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "expectedContentHash": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "PROCESSING", "SYNCED", "FAILED", "SUPERSEDED"]
+        },
+        "attemptCount": {
+          "type": "number"
+        },
+        "maxAttempts": {
+          "type": "number"
+        },
+        "manualRetryCount": {
+          "type": "number"
+        },
+        "leaseOwner": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "leaseGeneration": {
+          "type": "number"
+        },
+        "leaseExpiresAtMs": {
+          "type": "number"
+        },
+        "nextRetryAfterMs": {
+          "type": "number"
+        },
+        "lastError": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "memoryDocumentId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "proposalId",
+        "auditId",
+        "targetEntityType",
+        "targetEntityId",
+        "sourceRevisionId",
+        "status",
+        "attemptCount",
+        "maxAttempts",
+        "leaseGeneration",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RagGenerationStagingReceipt": {
+      "title": "RagGenerationStagingReceipt",
+      "description": "Durable server-side staging receipt for two-phase large-scale RAG generation indexing and pointer switching.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "entityKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "sourceEntityType": {
+          "type": "string"
+        },
+        "sourceEntityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "generation": {
+          "type": "number"
+        },
+        "activationMode": {
+          "type": "string",
+          "enum": ["INLINE_DOC", "MANIFEST_POINTER"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PREPARING", "STAGED", "VERIFIED", "ACTIVATED", "ABORTED", "CLEANUP_PENDING", "CLEANUP_COMPLETED"]
+        },
+        "expectedDocumentIds": {
+          "type": "array"
+        },
+        "expectedDocumentCount": {
+          "type": "number"
+        },
+        "expectedChunkCount": {
+          "type": "number"
+        },
+        "expectedContentHash": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "expectedSourceRevisionId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "stagedDocumentCount": {
+          "type": "number"
+        },
+        "stagedChunkCount": {
+          "type": "number"
+        },
+        "verifiedDocumentCount": {
+          "type": "number"
+        },
+        "verifiedChunkCount": {
+          "type": "number"
+        },
+        "batchesCommitted": {
+          "type": "number"
+        },
+        "targetTaskId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "targetLeaseGeneration": {
+          "type": "number"
+        },
+        "activationToken": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "cleanupOperationId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "cleanupEpoch": {
+          "type": "number"
+        },
+        "cleanupOwner": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "cleanupClaimedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "cleanupLeaseExpiresAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "cleanupLeaseExpiresAtMs": {
+          "type": "number"
+        },
+        "cleanupCompletedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "cleanupTargetDocumentIds": {
+          "type": "array"
+        },
+        "deletedDocumentCount": {
+          "type": "number"
+        },
+        "deletedChunkCount": {
+          "type": "number"
+        },
+        "errorMessage": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "verifiedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "activatedAt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "projectId",
+        "entityKey",
+        "sourceEntityType",
+        "sourceEntityId",
+        "generation",
+        "activationMode",
+        "status",
+        "expectedDocumentIds",
+        "expectedDocumentCount",
+        "expectedChunkCount",
+        "expectedContentHash",
+        "expectedSourceRevisionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{uid}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Author's novel projects."
+    },
+    "/users/{uid}/projects/{projectId}/characters/{characterId}": {
+      "schema": { "$ref": "#/entities/Character" },
+      "description": "Character profiles belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/worldbuilding/{itemId}": {
+      "schema": { "$ref": "#/entities/WorldbuildingItem" },
+      "description": "Worldbuilding settings belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/episodes/{episodeId}": {
+      "schema": { "$ref": "#/entities/Episode" },
+      "description": "Episode manuscripts belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/revisions/{revisionId}": {
+      "schema": { "$ref": "#/entities/Revision" },
+      "description": "Version snapshots of episodes belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/scenes/{sceneId}": {
+      "schema": { "$ref": "#/entities/Scene" },
+      "description": "Narrative scenes inside episodes linking events, characters, and foreshadowings."
+    },
+    "/users/{uid}/projects/{projectId}/foreshadowings/{foreshadowingId}": {
+      "schema": { "$ref": "#/entities/Foreshadowing" },
+      "description": "Foreshadowing clues tracked across episodes, scenes, events, and characters."
+    },
+    "/users/{uid}/projects/{projectId}/relationships/{relationshipId}": {
+      "schema": { "$ref": "#/entities/CharacterRelationship" },
+      "description": "Character relationships belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/timelineEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/TimelineEvent" },
+      "description": "Chronological timeline events belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/memoryDocuments/{documentId}": {
+      "schema": { "$ref": "#/entities/MemoryDocument" },
+      "description": "Indexed long-term memory documents for RAG retrieval."
+    },
+    "/users/{uid}/projects/{projectId}/memoryChunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/MemoryChunk" },
+      "description": "Chunked text segments belonging to MemoryDocuments."
+    },
+    "/users/{uid}/projects/{projectId}/styleProfiles/{profileId}": {
+      "schema": { "$ref": "#/entities/StyleProfile" },
+      "description": "Narrative style analysis profiles belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/changeProposals/{proposalId}": {
+      "schema": { "$ref": "#/entities/ChangeProposal" },
+      "description": "AI setting change approval proposals belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/changeProposalApprovalAudits/{auditId}": {
+      "schema": { "$ref": "#/entities/ChangeProposalApprovalAudit" },
+      "description": "Immutable approval and rejection audit logs written by the server Admin SDK."
+    },
+    "/users/{uid}/projects/{projectId}/ragSyncTasks/{taskId}": {
+      "schema": { "$ref": "#/entities/RagSyncTask" },
+      "description": "Server-side outbox tasks for post-approval RAG memory indexing."
+    },
+    "/users/{uid}/projects/{projectId}/ragGenerationStaging/{stagingId}": {
+      "schema": { "$ref": "#/entities/RagGenerationStagingReceipt" },
+      "description": "Server-side durable staging receipts for large-scale RAG generation indexing."
+    },
+    "/users/{uid}/projects/{projectId}/writingPromptProfiles/{profileId}": {
+      "schema": { "$ref": "#/entities/WritingPromptProfile" },
+      "description": "Versioned AI writing prompt templates belonging to a project."
+    },
+    "/users/{uid}/projects/{projectId}/writingPlans/{planId}": {
+      "schema": { "$ref": "#/entities/WritingPlan" },
+      "description": "AI episode scene writing plans awaiting or holding author approval."
+    }
+  }
+}

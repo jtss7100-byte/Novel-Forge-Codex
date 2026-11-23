@@ -1,0 +1,201 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingGenerationMode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingModelId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "canonStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingGenerationMode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingModelId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingGenerationMode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingModelId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "canonStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingGenerationMode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingModelId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "canonStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryChunks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sourceEntityType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "embeddingVector",
+          "vectorConfig": {
+            "dimension": 768,
+            "flat": {}
+          }
+        }
+      ]
+    },
+    {
+      "collectionGroup": "memoryDocuments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "projectId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "indexStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

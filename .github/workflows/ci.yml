@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUN_LIVE_CLOUD_TESTS: 'false'
+      NOVELFORGE_ENFORCE_CLOUD_AUTH: 'false'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Bun (Pinned Version)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Install dependencies from frozen lockfile
+        timeout-minutes: 3
+        run: bun install --frozen-lockfile
+
+      - name: TypeScript Typecheck (Lint)
+        timeout-minutes: 2
+        run: bun run lint
+
+      - name: Run Unit, Regression & Mock Integration Tests
+        timeout-minutes: 5
+        run: bun run test
+
+      - name: Build Production Web Application
+        timeout-minutes: 3
+        run: bun run build
+
+  emulator-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUN_LIVE_CLOUD_TESTS: 'false'
+      NOVELFORGE_ENFORCE_CLOUD_AUTH: 'false'
+      GCLOUD_PROJECT: 'demo-novelforge-rag-integrity'
+      FIREBASE_PROJECT_ID: 'demo-novelforge-rag-integrity'
+      TEST_FIREBASE_PROJECT_ID: 'demo-novelforge-rag-integrity'
+      TEST_FIRESTORE_DATABASE_ID: '(default)'
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
+      FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java 21 (Required for Firebase Emulators)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Bun (Pinned Version)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Install dependencies from frozen lockfile
+        timeout-minutes: 3
+        run: bun install --frozen-lockfile
+
+      - name: Lint Firestore Security Rules
+        timeout-minutes: 2
+        run: bunx eslint firestore.rules
+
+      - name: Run Real Firestore & Security Rules Emulator Suite
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          bunx firebase-tools emulators:exec \
+            --project demo-novelforge-rag-integrity \
+            --config firebase.emulator.json \
+            --only auth,firestore \
+            "bun run test:emulator" 2>&1 | tee /tmp/emulator-ci.log
+          if grep -Eqi "Did not find rules|No Firestore rules|Ignoring rules|default allow|rules will allow all" /tmp/emulator-ci.log; then
+            echo "ERROR: Firestore Emulator logged unapplied/open rules warning!"
+            exit 1
+          fi
+          if ! grep -Eqi "firestore\.rules|Loaded|All emulators started|Running tests" /tmp/emulator-ci.log; then
+            echo "WARNING: Could not confirm emulator log markers."
+          fi
+
