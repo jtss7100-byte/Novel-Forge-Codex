@@ -4045,6 +4045,25 @@ export interface AtomicStylePersistenceOptions {
   rawStyleWriteOverrideForTest?: Record<string, unknown>;
 }
 
+function resolveStyleApprovalTargets(
+  payload: StyleApprovalPayload,
+  options?: AtomicStylePersistenceOptions
+): { isCreateNewPrompt: boolean; styleProfileId: string; promptProfileId: string } {
+  const isCreateNewPrompt = Boolean(payload.createNewProfileInsteadOfOverwrite) || !payload.targetPromptProfileId;
+  const key = payload.idempotencyKey;
+  const operationId = key && /^[A-Za-z0-9_-]{1,120}$/.test(key) ? key : undefined;
+
+  return {
+    isCreateNewPrompt,
+    styleProfileId: payload.existingStyleProfileId || options?.forcedStyleProfileId ||
+      (operationId ? `style_${operationId}` : generateEntityId('style')),
+    promptProfileId: isCreateNewPrompt
+      ? options?.forcedPromptProfileId || payload.targetPromptProfileId ||
+        (operationId ? `prompt_${operationId}` : generateEntityId('prompt'))
+      : payload.targetPromptProfileId!,
+  };
+}
+
 /**
  * P0-C Pure Testable Atomic StyleProfile + PromptProfile Transaction Core.
  * Enforces:
@@ -4080,20 +4099,11 @@ export async function persistApprovedStyleDnaAtomicallyCore(params: {
   const nowIso = options?.nowIso || new Date().toISOString();
   const actor: ActorType = options?.actor || 'AUTHOR';
 
-  const isCreateNewPrompt =
-    Boolean(payload.createNewProfileInsteadOfOverwrite) ||
-    !payload.targetPromptProfileId;
-
-  const targetStyleProfileId =
-    payload.existingStyleProfileId ||
-    options?.forcedStyleProfileId ||
-    generateEntityId('style');
-
-  const targetPromptProfileId = isCreateNewPrompt
-    ? options?.forcedPromptProfileId ||
-      payload.targetPromptProfileId ||
-      generateEntityId('prompt')
-    : payload.targetPromptProfileId!;
+  const {
+    isCreateNewPrompt,
+    styleProfileId: targetStyleProfileId,
+    promptProfileId: targetPromptProfileId,
+  } = resolveStyleApprovalTargets(payload, options);
 
   // Fallback object used only when returning a rejected result before commit
   const fallbackPrepared = buildApprovedStyleProfilesForPersistence({
@@ -4416,18 +4426,11 @@ export async function persistApprovedStyleDnaAtomicallyFirestore(
   firestoreDb: Firestore = db
 ): Promise<StyleProfileApplicationResult> {
   const basePath = `users/${uid}/projects/${projectId}`;
-  const isCreateNewPrompt =
-    Boolean(payload.createNewProfileInsteadOfOverwrite) ||
-    !payload.targetPromptProfileId;
-  const resolvedStyleId =
-    payload.existingStyleProfileId ||
-    options?.forcedStyleProfileId ||
-    generateEntityId('style');
-  const resolvedPromptId = isCreateNewPrompt
-    ? options?.forcedPromptProfileId ||
-      payload.targetPromptProfileId ||
-      generateEntityId('prompt')
-    : payload.targetPromptProfileId!;
+  const {
+    isCreateNewPrompt,
+    styleProfileId: resolvedStyleId,
+    promptProfileId: resolvedPromptId,
+  } = resolveStyleApprovalTargets(payload, options);
 
   const fallbackPrepared = buildApprovedStyleProfilesForPersistence({
     payload: {

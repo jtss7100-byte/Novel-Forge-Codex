@@ -30,7 +30,7 @@ import {
   STYLE_INPUT_THRESHOLDS,
 } from '../utils/authorStyleLogic';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
-import { calculateCharCounts } from '../utils/novelLogic';
+import { calculateCharCounts, generateEntityId } from '../utils/novelLogic';
 
 interface AuthorStyleDnaPanelProps {
   projectId: string;
@@ -135,6 +135,7 @@ export const AuthorStyleDnaPanel: React.FC<AuthorStyleDnaPanelProps> = ({
     useState<StyleProfileApplicationResult | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingApproval = useRef<{ draft: string; key: string } | null>(null);
 
   const liveCounts = useMemo(() => {
     const txt =
@@ -337,7 +338,7 @@ export const AuthorStyleDnaPanel: React.FC<AuthorStyleDnaPanelProps> = ({
     setIsSavingApproval(true);
     setAnalysisError(null);
     try {
-      const result = await onApproveSaveStyleDNA({
+      const payload: StyleApprovalPayload = {
         ownerId,
         projectId,
         candidate,
@@ -356,11 +357,20 @@ export const AuthorStyleDnaPanel: React.FC<AuthorStyleDnaPanelProps> = ({
           createAsBranch || targetPromptProfileId === '__NEW__',
         allowAutoBranchOnConflict: false,
         activateOnApprove,
+      };
+      const draft = JSON.stringify({ ...payload, candidate: candidate.candidateId });
+      if (pendingApproval.current?.draft !== draft) {
+        pendingApproval.current = { draft, key: generateEntityId('style_approval') };
+      }
+      const result = await onApproveSaveStyleDNA({
+        ...payload,
+        idempotencyKey: pendingApproval.current.key,
       });
       setApprovalResult(result);
 
       // P0-C3: ONLY update targetPromptProfileId & base version pointers when BOTH docs committed atomically!
       if (result.approved && result.persistenceStatus === 'COMMITTED') {
+        pendingApproval.current = null;
         if (createAsBranch) {
           setProfileTitle(resolvedTitle);
         }

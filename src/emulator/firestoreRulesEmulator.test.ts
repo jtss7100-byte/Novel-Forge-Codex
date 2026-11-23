@@ -60,6 +60,7 @@ import {
   AUTHOR_STYLE_BENCHMARKS,
   buildDefaultSelectedStyleInstructions,
   evaluateStyleApprovalUiTransition,
+  extractStylePromptMetadata,
 } from '../utils/authorStyleLogic.ts';
 import { analyzeAuthorStyleOnServer } from '../server/authorStyleAnalyzer.ts';
 import { verifyServerCanonEvidenceForRewrite } from '../server/canonEvidenceGate.ts';
@@ -2051,36 +2052,58 @@ test('Emulator Test 9 (Phase 4.3C Stage 1.1): Atomic StyleProfile + PromptProfil
       });
     }
 
-    const { candidate: candidateA } = await analyzeAuthorStyleOnServer({
-      useGeminiStage2: false,
+    const episodeId = 'ep_style_source';
+    const revisionId = 'rev_style_source';
+    const revisionContent = AUTHOR_STYLE_BENCHMARKS[0].sampleText;
+    const sourceHash = computeManuscriptContentHash(revisionContent);
+    await adminHandle.db.doc(`${baseA}/episodes/${episodeId}`).set({
+      ownerId: owner.uid,
       projectId: projA,
-      inputMode: 'AUTHOR_SUPPLIED_SAMPLE',
-      sampleText: AUTHOR_STYLE_BENCHMARKS[0].sampleText,
-      sampleLabel: 'Stage 1.1 Emulator Sample A',
+      title: 'Stage 1.1 source episode',
+      latestRevisionId: revisionId,
     });
+    const revisionRef = adminHandle.db.doc(`${baseA}/revisions/${revisionId}`);
+    await revisionRef.set({
+      ownerId: owner.uid,
+      projectId: projA,
+      episodeId,
+      content: revisionContent,
+    });
+    const { candidate: candidateA } = await analyzeAuthorStyleOnServer(
+      {
+        ownerId: owner.uid,
+        projectId: projA,
+        inputMode: 'SAVED_REVISION',
+        episodeId,
+        revisionId,
+        expectedContentHash: sourceHash,
+        useGeminiStage2: false,
+      },
+      { db: adminHandle.db }
+    );
     const instructionsA = buildDefaultSelectedStyleInstructions(candidateA);
 
     // ------------------------------------------------------------------------
     // E9-A: StyleProfile + PROJECT_STYLE_PROFILE Atomic Initial Creation
     // ------------------------------------------------------------------------
-    const styleIdA = `style_e9a_${suffix}`;
-    const promptIdA = `prompt_e9a_${suffix}`;
+    const idempotencyKey = `e9a_${suffix}`;
+    const styleIdA = `style_${idempotencyKey}`;
+    const promptIdA = `prompt_${idempotencyKey}`;
+    const createPayload = {
+      ownerId: owner.uid,
+      projectId: projA,
+      candidate: candidateA,
+      profileTitle: '카엘 단문 액션 문체 v1',
+      selectedInstructions: instructionsA,
+      createNewProfileInsteadOfOverwrite: true,
+      activateOnApprove: true,
+      idempotencyKey,
+    };
     const createRes = await persistApprovedStyleDnaAtomicallyFirestore(
       owner.uid,
       projA,
-      {
-        ownerId: owner.uid,
-        projectId: projA,
-        candidate: candidateA,
-        profileTitle: '카엘 단문 액션 문체 v1',
-        selectedInstructions: instructionsA,
-        createNewProfileInsteadOfOverwrite: true,
-        activateOnApprove: true,
-      },
-      {
-        forcedStyleProfileId: styleIdA,
-        forcedPromptProfileId: promptIdA,
-      },
+      createPayload,
+      { nowIso: '2026-11-23T00:00:00.000Z' },
       owner.db
     );
 
@@ -2090,6 +2113,20 @@ test('Emulator Test 9 (Phase 4.3C Stage 1.1): Atomic StyleProfile + PromptProfil
     assert.equal(createRes.promptProfileSaved, true);
     assert.equal(createRes.promptProfile.currentVersionNumber, 1);
 
+    const retry = await persistApprovedStyleDnaAtomicallyFirestore(
+      owner.uid,
+      projA,
+      createPayload,
+      { nowIso: '2026-11-23T00:01:00.000Z' },
+      owner.db
+    );
+    assert.equal(retry.persistenceStatus, 'COMMITTED', retry.errorMessage);
+    assert.equal(retry.deduplicated, true);
+    assert.equal(retry.styleProfile.id, styleIdA);
+    assert.equal(retry.promptProfile.id, promptIdA);
+    assert.equal((await adminHandle.db.collection(`${baseA}/styleProfiles`).get()).size, 1);
+    assert.equal((await adminHandle.db.collection(`${baseA}/writingPromptProfiles`).get()).size, 1);
+
     const styleSnapA = await getDoc(
       doc(owner.db, `${baseA}/styleProfiles/${styleIdA}`)
     );
@@ -2098,6 +2135,12 @@ test('Emulator Test 9 (Phase 4.3C Stage 1.1): Atomic StyleProfile + PromptProfil
     );
     assert.equal(styleSnapA.exists(), true);
     assert.equal(promptSnapA.exists(), true);
+    assert.equal(styleSnapA.data()?.sourceRevisionId, revisionId);
+    const metadata = extractStylePromptMetadata(promptSnapA.data()?.content);
+    assert.equal(metadata.sourceHash, sourceHash);
+    assert.equal(metadata.sourceRevisionId, revisionId);
+    assert.equal(metadata.episodeId, episodeId);
+    assert.equal((await revisionRef.get()).data()?.content, revisionContent);
     assert.equal(promptSnapA.data()?.currentVersionNumber, 1);
     assert.equal((promptSnapA.data()?.versions || []).length, 1);
 

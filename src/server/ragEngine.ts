@@ -86,9 +86,11 @@ import {
  * Store runtime RAG disk cache in OS temp directory by default (`os.tmpdir()`)
  * so runtime cache files never pollute the Git working tree.
  */
-const RAG_CACHE_DIR =
-  process.env.NOVELFORGE_RAG_CACHE_DIR?.trim() ||
-  path.join(os.tmpdir(), 'novelforge_rag_cache');
+// Test workers clear their disk snapshots to simulate cold recovery.
+const RAG_CACHE_DIR = process.env.NODE_TEST_CONTEXT
+  ? fs.mkdtempSync(path.join(os.tmpdir(), 'novelforge-rag-test-'))
+  : process.env.NOVELFORGE_RAG_CACHE_DIR?.trim() ||
+    path.join(os.tmpdir(), 'novelforge_rag_cache');
 
 const FIRESTORE_MAX_BATCH_OPS = 450; // Safely below Firestore's 500 ops/batch hard limit
 const FIRESTORE_FENCED_CLEANUP_TX_MAX_DELETE_OPS = 200; // Reads (~202) + Deletes (<=200) <= 402 per atomic Firestore TX (< 500 hard limit)
