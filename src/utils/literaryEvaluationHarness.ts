@@ -20,6 +20,11 @@ export interface LiveEvalConfigValidationResult {
   disabledReason?: string;
 }
 
+export function randomizeBlindSides(seed: string, caseId: string, index: number) {
+  const hash = computeStableIdempotencyHash(`${seed}|${caseId}|${index}`);
+  return { hash, flip: parseInt(hash.slice(0, 2), 16) % 2 === 1 };
+}
+
 export const DEFAULT_LIVE_EVAL_MAX_CALLS = 8;
 export const HARD_CAP_LIVE_EVAL_MAX_CALLS = 16;
 export const DEFAULT_MAX_CHARS_PER_EXCERPT = 1500;
@@ -108,10 +113,7 @@ export function generateBlindAbPairs(params: {
             )
           : '';
 
-      const hashHex = computeStableIdempotencyHash(
-        `${baseSeed}|${res.caseId}|${idx}`
-      );
-      const flip = parseInt(hashHex.slice(0, 2), 16) % 2 === 1;
+      const { hash: hashHex, flip } = randomizeBlindSides(baseSeed, res.caseId, idx);
 
       const hiddenSideAssignment: BlindAbPairItem['hiddenSideAssignment'] = flip
         ? 'A_REWRITE_B_ORIGINAL'
@@ -161,7 +163,7 @@ export function resolveBlindChoiceToPreference(params: {
 }
 
 export function summarizeBlindAbRatings(
-  pairs: BlindAbPairItem[]
+  pairs: Pick<BlindAbPairItem, 'preference'>[]
 ): BlindAbSummaryStats {
   let originalPreferredCount = 0;
   let rewritePreferredCount = 0;

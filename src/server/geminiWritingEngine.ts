@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, type GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, Type, type GenerateContentParameters, type GenerateContentResponse } from '@google/genai';
 import type {
   ChangeProposal,
   ExpansionActionType,
@@ -569,6 +569,17 @@ function mapWriterIssueToWritingIssue(
   };
 }
 
+export interface EvaluationModelTransport {
+  modelId: string;
+  signal?: AbortSignal;
+  generate: (request: GenerateContentParameters) => Promise<GenerateContentResponse>;
+}
+
+function createWriterModelCall(signal: AbortSignal) {
+  const ai = getGenAiClient();
+  return (request: GenerateContentParameters) => callWithRetry(() => ai.models.generateContent(request), signal);
+}
+
 export async function generateNovelSceneOnServer(params: {
   runId?: string;
   ownerId?: string;
@@ -576,11 +587,12 @@ export async function generateNovelSceneOnServer(params: {
   plan?: WritingPlan | null;
   targetSceneNumber?: number;
   expansionAction?: ExpansionActionType;
+  evaluation?: EvaluationModelTransport;
 }): Promise<WritingResult> {
-  const { context, plan, targetSceneNumber, expansionAction } = params;
+  const { context, plan, targetSceneNumber, expansionAction, evaluation } = params;
   const ownerId = params.ownerId || 'local_author';
   const runId = params.runId || generateEntityId('run_write');
-  const modelId = getConfiguredWritingModel();
+  const modelId = evaluation?.modelId ?? getConfiguredWritingModel();
   const nowIso = new Date().toISOString();
 
   // Enforce author plan approval gate for planned episode/scene generation
@@ -590,10 +602,21 @@ export async function generateNovelSceneOnServer(params: {
   ) {
     assertPlanApprovedForWriting(plan);
   }
+  if (evaluation && (ownerId !== 'novel_writer_evaluation' || context.ownerId !== ownerId ||
+      !context.projectId.startsWith('novel_eval_') || context.writingMode !== 'SINGLE_SCENE' ||
+      expansionAction || !targetSceneNumber || !plan?.scenes.some((scene) => scene.sceneNumber === targetSceneNumber) ||
+      plan.ownerId !== ownerId || plan.projectId !== context.projectId || plan.episodeId !== context.episodeId ||
+      !context.retrievedMemoryChunks?.length || context.retrievedMemoryChunks.some((chunk) =>
+        chunk.projectId !== context.projectId || !chunk.verifiedForWriting || chunk.canonStatus !== 'CANON' || chunk.freshnessStatus !== 'FRESH'))) {
+    throw new Error('EVALUATION_ISOLATION_OR_RAG_PROVENANCE_FAILURE');
+  }
 
   acquireEpisodeLock(context.projectId, context.episodeId, runId);
   const abortController = new AbortController();
   activeRunAborters.set(runId, abortController);
+  const generationSignal = evaluation?.signal
+    ? AbortSignal.any([abortController.signal, evaluation.signal])
+    : abortController.signal;
 
   const sceneOutputs: SceneDraftOutput[] = [];
   const accumulatedWriterIssues: NovelForgeWriterIssue[] = [];
@@ -736,7 +759,10 @@ export async function generateNovelSceneOnServer(params: {
       }
     }
 
-    const ai = getGenAiClient();
+    const generate = evaluation
+      ? (request: GenerateContentParameters) =>
+          evaluation.generate({ ...request, config: { ...request.config, abortSignal: generationSignal } })
+      : createWriterModelCall(abortController.signal);
 
     // Case 1: Expansion Action on current manuscript/scene (Rule 2 & Rule 3: expand density only, no new events)
     if (expansionAction) {
@@ -768,19 +794,15 @@ export async function generateNovelSceneOnServer(params: {
       });
       const promptBody = assembledOrder.orderedPrompt;
 
-      const response = await callWithRetry(
-        () =>
-          ai.models.generateContent({
-            model: modelId,
-            contents: promptBody,
-            config: {
-              systemInstruction: dynamicSystemInstruction,
-              responseMimeType: 'application/json',
-              responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
-            },
-          }),
-        abortController.signal
-      );
+      const response = await generate({
+        model: modelId,
+        contents: promptBody,
+        config: {
+          systemInstruction: dynamicSystemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
+        },
+      });
 
       const rawText = (response.text ?? '{}').trim();
       const validatedWriter = validateAndNormalizeWriterResponse(
@@ -903,19 +925,15 @@ export async function generateNovelSceneOnServer(params: {
       });
       const promptBody = assembledOrder.orderedPrompt;
 
-      const response = await callWithRetry(
-        () =>
-          ai.models.generateContent({
-            model: modelId,
-            contents: promptBody,
-            config: {
-              systemInstruction: dynamicSystemInstruction,
-              responseMimeType: 'application/json',
-              responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
-            },
-          }),
-        abortController.signal
-      );
+      const response = await generate({
+        model: modelId,
+        contents: promptBody,
+        config: {
+          systemInstruction: dynamicSystemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
+        },
+      });
 
       const rawText = (response.text ?? '{}').trim();
       const validatedWriter = validateAndNormalizeWriterResponse(
@@ -1036,7 +1054,7 @@ export async function generateNovelSceneOnServer(params: {
     const usedScopedVoiceIds = new Set<string>();
 
     for (const scenePlan of targetList) {
-      if (abortController.signal.aborted) {
+      if (generationSignal.aborted) {
         break;
       }
 
@@ -1065,22 +1083,22 @@ export async function generateNovelSceneOnServer(params: {
         totalScenesInPlan: plan?.scenes?.length ?? 1,
         episodeGoal: plan?.episodeGoal,
         previousSceneEndingExcerpt: rollingPreviousSceneTail,
+        retainDefaultStyleGuidance: Boolean(evaluation),
       });
       const scenePrompt = assembledSceneOrder.orderedPrompt;
 
-      const response = await callWithRetry(
-        () =>
-          ai.models.generateContent({
-            model: modelId,
-            contents: scenePrompt,
-            config: {
-              systemInstruction: dynamicSystemInstruction,
-              responseMimeType: 'application/json',
-              responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
-            },
-          }),
-        abortController.signal
-      );
+      const response = await generate({
+        model: modelId,
+        contents: scenePrompt,
+        config: {
+          systemInstruction: dynamicSystemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: NOVELFORGE_WRITER_GEMINI_RESPONSE_SCHEMA,
+        },
+      });
+      if (evaluation && response.candidates?.some((candidate) => candidate.finishReason && candidate.finishReason !== 'STOP')) {
+        throw new Error('INCOMPLETE_GENERATION');
+      }
 
       const rawText = (response.text ?? '{}').trim();
       const validatedWriter = validateAndNormalizeWriterResponse(
@@ -1206,7 +1224,7 @@ export async function generateNovelSceneOnServer(params: {
         usageMetadata: totalUsage,
         status: isBlocked
           ? 'BLOCKED'
-          : abortController.signal.aborted
+          : generationSignal.aborted
           ? 'PARTIAL'
           : 'COMPLETED',
         createdAt: nowIso,

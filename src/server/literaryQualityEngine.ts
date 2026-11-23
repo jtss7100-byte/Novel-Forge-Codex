@@ -25,6 +25,7 @@ import {
   releaseEpisodeLock,
   reviewManuscriptOnServer,
   translateGeminiErrorKo,
+  type EvaluationModelTransport,
 } from './geminiWritingEngine.ts';
 
 export type CustomLiteraryQualityEvaluator = (params: {
@@ -58,6 +59,7 @@ export async function evaluateLiteraryQualityOnServer(params: {
   includeStyleEditorAudit?: boolean;
   styleReferences?: StyleReferenceAnalysis[];
   existingStyleIssues?: WritingIssue[];
+  evaluation?: EvaluationModelTransport;
 }): Promise<LiteraryQualityEvaluationResponse> {
   const {
     ownerId,
@@ -87,7 +89,11 @@ export async function evaluateLiteraryQualityOnServer(params: {
   }
 
   const runId = params.sourceRunId?.trim() || generateEntityId('run_lq');
-  const modelId = getConfiguredWritingModel();
+  const modelId = params.evaluation?.modelId ?? getConfiguredWritingModel();
+  if (params.evaluation && (ownerId !== 'novel_writer_evaluation' || context.ownerId !== ownerId ||
+      !projectId.startsWith('novel_eval_') || includeStyleEditorAudit)) {
+    throw new Error('EVALUATION_ISOLATION_FAILURE');
+  }
   const lockEpisodeKey = `${episodeId}:quality`;
 
   const promptBuild = buildLiteraryQualityEvaluationPrompt({
@@ -115,7 +121,7 @@ export async function evaluateLiteraryQualityOnServer(params: {
   try {
     let rawAiOutput: unknown;
 
-    if (customLiteraryQualityEvaluatorForTesting) {
+    if (!params.evaluation && customLiteraryQualityEvaluatorForTesting) {
       qualityApiCalls = 1;
       const mocked = await customLiteraryQualityEvaluatorForTesting({
         systemInstruction: promptBuild.systemInstruction,
@@ -133,10 +139,8 @@ export async function evaluateLiteraryQualityOnServer(params: {
         isActualUsage: false,
       };
     } else {
-      const ai = getGenAiClient();
       qualityApiCalls = 1;
-      const response = await callWithRetry(() =>
-        ai.models.generateContent({
+      const request = {
           model: modelId,
           contents: promptBuild.promptContent,
           config: {
@@ -144,8 +148,14 @@ export async function evaluateLiteraryQualityOnServer(params: {
             responseMimeType: 'application/json',
             responseSchema: LITERARY_QUALITY_GEMINI_RESPONSE_SCHEMA,
           },
-        })
-      );
+      };
+      let response;
+      if (params.evaluation) {
+        response = await params.evaluation.generate({ ...request, config: { ...request.config, abortSignal: params.evaluation.signal } });
+      } else {
+        const ai = getGenAiClient();
+        response = await callWithRetry(() => ai.models.generateContent(request));
+      }
       const rawText = (response.text ?? '{}').trim();
       rawAiOutput = JSON.parse(rawText);
       qualityUsage = extractUsageMetadata(

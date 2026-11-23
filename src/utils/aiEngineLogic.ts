@@ -1264,6 +1264,7 @@ export function assembleNovelWriterPromptInOrder(params: {
   episodeGoal?: string;
   previousSceneEndingExcerpt?: string;
   specialModeInstruction?: string;
+  retainDefaultStyleGuidance?: boolean;
 }): {
   orderedPrompt: string;
   stepLabels: string[];
@@ -1277,6 +1278,7 @@ export function assembleNovelWriterPromptInOrder(params: {
     episodeGoal,
     previousSceneEndingExcerpt,
     specialModeInstruction,
+    retainDefaultStyleGuidance = false,
   } = params;
 
   const appliedMasterRulesVersion = extractAppliedMasterRulesVersion(context);
@@ -1453,14 +1455,17 @@ export function assembleNovelWriterPromptInOrder(params: {
   const step5ProjectStyleProfile = [
     '<step_5_project_style_profile>',
     '[5단계: 작품별 문체 프로필 (Master Writing Rules · 확정 CANON · 동적 시점 · 인물 말투 아래에서만 적용)]',
+    retainDefaultStyleGuidance || !styleProfiles.length
+      ? '- 모바일 가독성과 자연스러운 한국어를 우선하며, 짧은 문장과 호흡 있는 문장을 장면 긴장도에 맞추어 배합합니다.'
+      : null,
     styleProfiles.length > 0
       ? styleProfiles
           .map((p) => `### ${p.title} (${p.versionId})\n${sanitizeEmbeddedDataAgainstCommandInjection(p.content)}`)
           .join('\n\n')
-      : '- 모바일 가독성과 자연스러운 한국어를 우선하며, 짧은 문장과 호흡 있는 문장을 장면 긴장도에 맞추어 배합합니다.',
+      : null,
     '- [문체 적용 경계] 작품 문체 규칙은 서술 호흡·문단 여백·감각 밀도에만 참고하며, 7단계의 동적 시점(장면>회차>작품)이나 6단계의 등장인물별 고유 말투를 절대 덮어쓰거나 획일화하지 마십시오.',
     '</step_5_project_style_profile>',
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 
   const characterDialogueSummary =
     context.canonCharacters.length > 0

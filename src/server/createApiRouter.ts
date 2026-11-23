@@ -22,6 +22,7 @@ import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewChar
 import { resolveVoicePromptContext } from './voicePromptContext.ts';
 import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinuityDecision, saveVoiceDecisionRequest } from './voiceContinuityDecisions.ts';
 import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
+import { cancelEvaluationSession, evaluationCancelInput, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
 import {
   executeServerManuscriptExtraction,
   saveVerifiedExtractionProposalsOnServer,
@@ -538,6 +539,38 @@ export function createApiRouter(): express.Router {
   };
   app.get('/api/voice-continuity/decisions', voiceDecisions);
   app.post('/api/voice-continuity/decisions', voiceDecisions);
+
+  const novelEvaluation: express.RequestHandler = async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const owner = await resolveRequestOwner(req);
+    if (!owner.ok) {
+      res.status(owner.statusCode).json({ error: 'EVALUATION_AUTH_REQUIRED' });
+      return;
+    }
+    try {
+      const action = req.path.split('/').filter(Boolean).at(-1);
+      if (req.method === 'GET') {
+        res.json(getEvaluationSettings(owner.isAuthenticatedCloud));
+      } else if (action === 'run') {
+        const input = evaluationRunInput.safeParse(req.body);
+        if (!input.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_SETTINGS');
+        res.json(await startEvaluationSession(owner.ownerId, owner.isAuthenticatedCloud, input.data));
+      } else if (action === 'cancel') {
+        const input = evaluationCancelInput.safeParse(req.body);
+        if (!input.success) throw new EvaluationRequestError(400, 'INVALID_EVALUATION_OPERATION');
+        res.json(cancelEvaluationSession(owner.ownerId, input.data.operationId));
+      } else {
+        const input = evaluationReviewInput.safeParse(req.body);
+        if (!input.success) throw new EvaluationRequestError(400, 'INVALID_BLIND_RATING');
+        res.json(finalizeEvaluationSession(owner.ownerId, input.data.operationId, input.data.ratings));
+      }
+    } catch (error) {
+      res.status(error instanceof EvaluationRequestError ? error.status : 500)
+        .json({ error: error instanceof EvaluationRequestError ? error.code : 'EVALUATION_FAILED' });
+    }
+  };
+  app.get('/api/novel-writing-evaluation/settings', novelEvaluation);
+  app.post(['/api/novel-writing-evaluation/run', '/api/novel-writing-evaluation/cancel', '/api/novel-writing-evaluation/review'], novelEvaluation);
 
   app.post(['/api/ai/analyze-character-voice', '/api/ai/review-style-continuity'], async (req, res) => {
     const owner = await resolveRequestOwner(req);

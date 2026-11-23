@@ -89,6 +89,7 @@ import {
 } from '../utils/literaryRewritingLogic';
 import { generateEntityId } from '../utils/novelLogic';
 import { LiteraryQualityPanel } from './LiteraryQualityPanel';
+import { NovelWritingEvaluationPanel } from './NovelWritingEvaluationPanel';
 import type { VoiceRewriteSelection } from './CharacterVoicePanel';
 
 interface AiWritingPanelProps {
@@ -3038,6 +3039,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
         onApplyRevisedManuscript={handleApplyQualityRevisions}
         onRequestRewriteForFinding={handleRequestRewriteFromQualityFinding}
       />
+      <NovelWritingEvaluationPanel key={project.ownerId} getIdToken={getIdToken} />
 
       {/* ==================================================================== */}
       {/* PHASE 4.3B: [정밀 문학 리라이팅] (R1~R6 · 원고 보호 · 작가 승인)      */}
