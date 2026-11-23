@@ -20,6 +20,8 @@ import { rewriteLiteraryPassageOnServer } from './literaryRewritingEngine.ts';
 import { analyzeAuthorStyleOnServer } from './authorStyleAnalyzer.ts';
 import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewCharacterContinuity, voiceAnalysisRequest, VoiceRequestError } from './characterVoiceAnalyzer.ts';
 import { resolveVoicePromptContext } from './voicePromptContext.ts';
+import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinuityDecision, saveVoiceDecisionRequest } from './voiceContinuityDecisions.ts';
+import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
 import {
   executeServerManuscriptExtraction,
   saveVerifiedExtractionProposalsOnServer,
@@ -504,6 +506,38 @@ export function createApiRouter(): express.Router {
       res.status(statusCode).json({ error: msg });
     }
   });
+
+  const voiceDecisions: express.RequestHandler = async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const owner = await resolveRequestOwner(req, true);
+    if (!owner.ok || !owner.isAuthenticatedCloud) {
+      const status = owner.ok ? 401 : owner.statusCode;
+      res.status(status).json({ error: status === 403 ? '요청한 소유자가 로그인한 계정과 일치하지 않습니다.' : 'Firebase 로그인을 확인해 주세요.' });
+      return;
+    }
+    try {
+      const firestore = getVoiceFirestore();
+      if (req.method === 'GET') {
+        const parsed = listVoiceDecisionQuery.safeParse(req.query);
+        if (!parsed.success) throw new VoiceRequestError(400, '유효한 판단 기록 조회 조건이 필요합니다.');
+        res.json(await listVoiceContinuityDecisions(firestore, owner.ownerId, parsed.data));
+      } else {
+        const parsed = saveVoiceDecisionRequest.safeParse(req.body);
+        if (!parsed.success) throw new VoiceRequestError(400, '유효한 판단 기록 저장 조건이 필요합니다.');
+        res.json(await saveVoiceContinuityDecision(firestore, owner.ownerId, parsed.data));
+      }
+    } catch (error) {
+      if (error instanceof VoiceDecisionError) {
+        res.status(error.code === 'INVALID_DECISION' ? 400 : 409).json({ error: error.code, code: error.code });
+      } else if (error instanceof VoiceRequestError) {
+        res.status(error.status).json({ error: error.message, ...(error.message.startsWith('STALE_SOURCE') ? { code: 'STALE_SOURCE' } : {}) });
+      } else {
+        res.status(500).json({ error: '화법 판단 기록을 처리하지 못했습니다.' });
+      }
+    }
+  };
+  app.get('/api/voice-continuity/decisions', voiceDecisions);
+  app.post('/api/voice-continuity/decisions', voiceDecisions);
 
   app.post(['/api/ai/analyze-character-voice', '/api/ai/review-style-continuity'], async (req, res) => {
     const owner = await resolveRequestOwner(req);

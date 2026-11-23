@@ -1,5 +1,5 @@
 import { getApp } from 'firebase-admin/app';
-import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getFirestore, type Firestore, type Transaction } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import type { CharacterVoiceAnalysisCandidate } from '../types/characterVoice';
 import type { ContinuitySample } from '../types/styleContinuity';
@@ -7,6 +7,7 @@ import { analyzeVoiceSample, collectVoiceEvidence, VOICE_DIMENSIONS } from '../u
 import { computeDeterministicStyleMetrics, sanitizeStyleTextAgainstInjection } from '../utils/authorStyleLogic';
 import { compareEpisodeStyles } from '../utils/crossEpisodeStyleLogic';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
+import { buildVoiceContinuityFingerprint, continuityEvidenceHash, type VerifiedContinuitySampleIdentity } from '../utils/voiceContinuityDecisionLogic';
 import { ensureFirebaseAdminInitialized, getFirebaseDatabaseId } from './authMiddleware';
 import { getConfiguredWritingModel, getGenAiClient, isGeminiApiKeyReady } from './geminiWritingEngine';
 
@@ -32,6 +33,8 @@ const saved = z.object({
 const relationship = tenant.extend({
   sourceCharacterId: id, targetCharacterId: id, canonStatus: z.string(),
   effectiveEpisodeId: z.string().optional(), relationType: z.string().max(150).optional(),
+  affinityScore: z.number().optional(), isDirectional: z.boolean().optional(),
+  effectiveEventId: z.string().optional(), sourceRevisionId: z.string().optional(), description: z.string().optional(),
 });
 const common = z.object({
   projectId: id, characterId: id, localCast: z.array(character).max(200).optional(),
@@ -61,14 +64,18 @@ function belongsTo(value: { ownerId: string; projectId: string }, scope: Scope):
   return value.ownerId === scope.ownerId && value.projectId === scope.projectId;
 }
 
-async function loadScope(scope: Scope, db?: Firestore) {
+async function loadScope(scope: Scope, db?: Firestore, transaction?: Transaction) {
   const base = `users/${scope.ownerId}/projects/${scope.projectId}`;
   let cast = scope.localCast ?? [];
   let relationships = scope.localRelationships ?? [];
   if (db) {
+    const projectRef = db.doc(base);
+    const castQuery = db.collection(`${base}/characters`).where('ownerId', '==', scope.ownerId).limit(200);
+    const relationQuery = db.collection(`${base}/relationships`).where('ownerId', '==', scope.ownerId).limit(300);
     const [project, castDocs, relationDocs] = await Promise.all([
-      db.doc(base).get(), db.collection(`${base}/characters`).where('ownerId', '==', scope.ownerId).limit(200).get(),
-      db.collection(`${base}/relationships`).where('ownerId', '==', scope.ownerId).limit(300).get(),
+      transaction ? transaction.get(projectRef) : projectRef.get(),
+      transaction ? transaction.get(castQuery) : castQuery.get(),
+      transaction ? transaction.get(relationQuery) : relationQuery.get(),
     ]);
     if (!project.exists || project.data()?.ownerId !== scope.ownerId || project.data()?.id !== scope.projectId) {
       throw new VoiceRequestError(403, '프로젝트 소유권을 확인할 수 없습니다.');
@@ -94,13 +101,15 @@ async function loadScope(scope: Scope, db?: Firestore) {
   };
 }
 
-export async function loadVoiceRevision(scope: Scope, input: SavedInput, db?: Firestore) {
+export async function loadVoiceRevision(scope: Scope, input: SavedInput, db?: Firestore, transaction?: Transaction) {
   const base = `users/${scope.ownerId}/projects/${scope.projectId}`;
   let pair: unknown = input.local;
   if (db) {
+    const episodeRef = db.doc(`${base}/episodes/${input.episodeId}`);
+    const revisionRef = db.doc(`${base}/revisions/${input.revisionId}`);
     const [ep, rev] = await Promise.all([
-      db.doc(`${base}/episodes/${input.episodeId}`).get(),
-      db.doc(`${base}/revisions/${input.revisionId}`).get(),
+      transaction ? transaction.get(episodeRef) : episodeRef.get(),
+      transaction ? transaction.get(revisionRef) : revisionRef.get(),
     ]);
     if (!ep.exists || !rev.exists) throw new VoiceRequestError(404, '회차 또는 Revision을 찾을 수 없습니다.');
     pair = { episode: ep.data(), revision: rev.data() };
@@ -187,24 +196,43 @@ export async function analyzeCharacterVoice(
 }
 
 export async function reviewCharacterContinuity(
-  request: z.infer<typeof continuityRequest>, ownerId: string, db?: Firestore
+  request: z.infer<typeof continuityRequest>, ownerId: string, db?: Firestore, transaction?: Transaction
 ) {
   const scope = { ...request, ownerId };
-  const { cast, relationships } = await loadScope(scope, db);
+  const { cast, relationships } = await loadScope(scope, db, transaction);
   const keys = request.inputs.map((item) => `${item.episodeId}:${item.revisionId}`);
   if (new Set(keys).size !== keys.length) throw new VoiceRequestError(400, '같은 Revision을 여러 번 선택할 수 없습니다.');
-  const samples = await Promise.all(request.inputs.map(async (input): Promise<ContinuitySample> => {
-    const loaded = await loadVoiceRevision(scope, input, db);
+  const pairs = await Promise.all(request.inputs.map(async (input): Promise<{ sample: ContinuitySample; identity: VerifiedContinuitySampleIdentity }> => {
+    const loaded = await loadVoiceRevision(scope, input, db, transaction);
     const { ep, text: sourceText, source } = loaded;
     const candidate = analyzeVoiceSample({ ...scope, text: sourceText, cast, source, assignments: input.assignments });
-    return {
+    const related = relationships.filter((rel) => rel.effectiveEpisodeId === ep.id &&
+      ep.linkedCharacterIds.includes(rel.sourceCharacterId) && ep.linkedCharacterIds.includes(rel.targetCharacterId));
+    const sample: ContinuitySample = {
       source, episodeNumber: ep.episodeNumber, episodeTitle: ep.title, sceneKind: input.sceneKind,
       characterIds: ep.linkedCharacterIds.filter((characterId) => cast.some((entry) => entry.id === characterId)),
       style: computeDeterministicStyleMetrics(sourceText), voice: candidate.metrics,
       voiceExcerpts: collectVoiceEvidence(candidate.excerpts, scope.characterId),
-      canonRelationshipChange: relationships.some((rel) => rel.effectiveEpisodeId === ep.id &&
-        ep.linkedCharacterIds.includes(rel.sourceCharacterId) && ep.linkedCharacterIds.includes(rel.targetCharacterId)),
+      canonRelationshipChange: related.length > 0,
     };
+    return { sample, identity: {
+      ...source, episodeNumber: sample.episodeNumber, sceneKind: sample.sceneKind, characterIds: sample.characterIds,
+      speakerFingerprint: continuityEvidenceHash(candidate.excerpts.map((entry) => [
+        entry.startOffset, entry.endOffset, entry.characterId ?? '', entry.attribution,
+      ])),
+      relationshipFingerprint: continuityEvidenceHash(related.map((entry) => [
+        entry.id, entry.sourceCharacterId, entry.targetCharacterId, entry.relationType ?? '',
+        entry.affinityScore ?? '', entry.isDirectional ?? '', entry.description ?? '', entry.effectiveEpisodeId ?? '',
+        entry.effectiveEventId ?? '', entry.sourceRevisionId ?? '',
+      ])),
+    } };
   }));
-  return compareEpisodeStyles(samples.sort((a, b) => a.episodeNumber - b.episodeNumber));
+  pairs.sort((a, b) => a.sample.episodeNumber - b.sample.episodeNumber);
+  const report = compareEpisodeStyles(pairs.map(({ sample }) => sample));
+  const cohort = pairs.map(({ identity }) => identity);
+  const decisionScope = { ownerId, characterId: request.characterId, projectId: request.projectId };
+  return { ...report, findings: report.findings.map((finding) => ({
+    ...finding,
+    decisionIdentity: buildVoiceContinuityFingerprint(decisionScope, cohort[finding.before], cohort[finding.after], cohort, finding),
+  })) };
 }

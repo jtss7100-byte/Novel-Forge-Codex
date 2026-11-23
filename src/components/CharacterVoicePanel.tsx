@@ -7,6 +7,7 @@ import { VOICE_DIMENSIONS, buildApprovedVoiceContent, readApprovedVoiceSources, 
 import { computeManuscriptContentHash, createRewriteSelectionAnchor } from '../utils/manuscriptIntegrity';
 import { createNewPromptProfile, restorePromptProfileToVersion, updatePromptProfileContent } from '../utils/aiEngineLogic';
 import { generateEntityId } from '../utils/novelLogic';
+import { VoiceContinuityDecisions, type DecisionAnalysisInput } from './VoiceContinuityDecisions';
 
 export interface VoiceRewriteSelection { projectId: string; episodeId: string; characterIds: string[]; anchor: RewriteSelectionAnchor }
 export interface CharacterVoicePanelProps {
@@ -30,9 +31,7 @@ const button = 'rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slat
 const attributionLabel = {
   AUTHOR_CONFIRMED: '작가 확인', EXPLICITLY_OBSERVED: '원문 명시', AMBIGUOUS: '모호함', UNKNOWN: '미확인', INFERRED: '추론',
 };
-const continuityLabel = {
-  CONSISTENT: '일관성 확인', INTENTIONAL_VARIATION: '의도적 변화 후보', POTENTIAL_DRIFT: '추가 검토', INSUFFICIENT_EVIDENCE: '근거 부족',
-};
+const emptyDecisionInputs: DecisionAnalysisInput[] = [];
 
 function changeVoiceActivation(profile: PromptProfile): PromptProfile {
   const now = new Date().toISOString();
@@ -58,8 +57,8 @@ export function CharacterVoicePanel(props: CharacterVoicePanelProps) {
   const [base, setBase] = useState<PromptProfile | null>(null);
   const [assignments, setAssignments] = useState<Record<string, Record<string, string>>>({});
   const [selectedRevisions, setSelectedRevisions] = useState<Record<string, ContinuitySceneKind>>({});
-  const [report, setReport] = useState<StyleContinuityReport | null>(null);
-  const [decisions, setDecisions] = useState<Record<string, 'intent' | 'review'>>({});
+  const [comparison, setComparison] = useState<{ report: StyleContinuityReport; inputs: DecisionAnalysisInput[] } | null>(null);
+  const report = comparison?.report ?? null;
   const [busy, setBusy] = useState('');
   const busyRef = useRef(false);
   const [error, setError] = useState('');
@@ -223,6 +222,7 @@ export function CharacterVoicePanel(props: CharacterVoicePanelProps) {
               if (!currentSourceKey || !who) return;
               const next = { ...assignments[currentSourceKey], [excerpt.id]: who };
               setAssignments({ ...assignments, [currentSourceKey]: next });
+              setComparison(null);
               void analyze(next);
             }}><option value="" disabled>화자 지정</option>{props.characters.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>
           </div>)}</div>
@@ -245,58 +245,52 @@ export function CharacterVoicePanel(props: CharacterVoicePanelProps) {
               if (e.target.checked && Object.keys(next).length < 12) next[revision.id] = 'UNKNOWN';
               else delete next[revision.id];
               setSelectedRevisions(next);
-              setReport(null);
+              setComparison(null);
             }} /> {episodes.find((ep) => ep.id === revision.episodeId)?.title} · {revision.label} · {revision.id}</label>
             {revision.id in selectedRevisions && <select aria-label={`${revision.id} 장면 유형`} className={field} value={selectedRevisions[revision.id]} onChange={(e) => {
-              setSelectedRevisions({ ...selectedRevisions, [revision.id]: e.target.value as ContinuitySceneKind }); setReport(null);
+              setSelectedRevisions({ ...selectedRevisions, [revision.id]: e.target.value as ContinuitySceneKind }); setComparison(null);
             }}><option value="UNKNOWN">장면 유형 미지정</option><option value="DAILY">일상</option><option value="COMBAT">전투</option><option value="CRISIS">위기</option><option value="REFLECTION">성찰</option></select>}
           </div>)}
         </div>
         <button className={button} disabled={Boolean(busy) || Object.keys(selectedRevisions).length < 2} onClick={() => void action('회차 비교 중', async () => {
-          const compared = await request<StyleContinuityReport>('/api/ai/review-style-continuity', {
-            inputs: Object.entries(selectedRevisions).map(([id, sceneKind]) => savedInput(id, sceneKind)),
-          });
-          setReport(compared);
-          const stored = Object.fromEntries<'intent' | 'review'>(compared.findings.flatMap((finding): [string, 'intent' | 'review'][] => {
-            const a = compared.samples[finding.before].source;
-            const b = compared.samples[finding.after].source;
-            const value = localStorage.getItem(`nf_voice:${ownerId}:${projectId}:${character.id}:${a.revisionId}:${a.contentHash}:${b.revisionId}:${b.contentHash}:${finding.dimension}`);
-            return value === 'intent' || value === 'review' ? [[finding.id, value]] : [];
-          }));
-          setDecisions(stored);
+          const selections = Object.entries(selectedRevisions).map(([id, sceneKind]) => savedInput(id, sceneKind));
+          const report = await request<StyleContinuityReport>('/api/ai/review-style-continuity', { inputs: selections });
+          const inputs = selections.map(({ episodeId, revisionId, contentHash, sceneKind, assignments }) =>
+            ({ episodeId, revisionId, contentHash, sceneKind, assignments }));
+          setComparison({ report, inputs });
         })}>선택한 Revision 비교</button>
         {report && <div className="space-y-3 pt-3">
           {report.samples.map(({ source, episodeTitle, style, voice }) => <p key={source.revisionId} className="text-xs text-slate-300">
             {episodeTitle} · {source.revisionId} · {style.sentenceCount}문장 / {style.paragraphCount}문단 · 대사 {style.dialogueRatioPercent}% · 확인 발화 {voice.count}개 {stalenessKey(source) ? ' · STALE_SOURCE' : ''}
           </p>)}
-          {report.findings.map((finding) => {
-            const before = report.samples[finding.before];
+        </div>}
+        <VoiceContinuityDecisions
+          scope={{ ownerId, projectId, characterId: character.id }}
+          cloud={props.cloud}
+          getIdToken={props.getIdToken}
+          report={report}
+          inputs={comparison?.inputs ?? emptyDecisionInputs}
+          cohortStale={report?.samples.some(({ source }) => stalenessKey(source)) ?? false}
+          sourceStale={(record) => ![
+            [record.beforeRevisionId, record.beforeContentHash],
+            [record.afterRevisionId, record.afterContentHash],
+          ].every(([id, hash]) => {
+            const revision = eligibleRevisions.find((item) => item.id === id);
+            return revision !== undefined && computeManuscriptContentHash(revision.content) === hash;
+          })}
+          renderFindingActions={(finding) => {
+            if (!report || finding.dimension !== 'VOICE') return null;
             const after = report.samples[finding.after];
-            const stale = stalenessKey(before.source) || stalenessKey(after.source);
-            const decide = (decision: 'intent' | 'review') => {
-              const a = before.source;
-              const b = after.source;
-              localStorage.setItem(`nf_voice:${ownerId}:${projectId}:${character.id}:${a.revisionId}:${a.contentHash}:${b.revisionId}:${b.contentHash}:${finding.dimension}`, decision);
-              setDecisions({ ...decisions, [finding.id]: decision });
-            };
             const excerpt = after.voiceExcerpts[0];
             const episode = episodes.find((item) => item.id === after.source.episodeId);
-            const canRewrite = Boolean(excerpt && episode && episode.latestRevisionId === after.source.revisionId &&
-              computeManuscriptContentHash(episode.content) === after.source.contentHash);
-            return <article key={finding.id} className="space-y-1 border-t border-slate-800 pt-2 text-xs">
-              <p>{before.source.revisionId} → {after.source.revisionId} · {finding.dimension} · {stale ? '출처 변경됨' : decisions[finding.id] === 'intent' ? '작가가 의도한 변화로 승인' : decisions[finding.id] === 'review' ? '작가가 추가 검토로 표시' : continuityLabel[finding.status]} · 신뢰도 {finding.confidence}</p>
-              <p className="text-slate-400">{finding.description}</p>
-              {!stale && (finding.status === 'POTENTIAL_DRIFT' || finding.status === 'INTENTIONAL_VARIATION') && <div className="flex flex-wrap gap-2">
-                <button className={button} onClick={() => decide('intent')}>의도한 변화로 승인</button>
-                <button className={button} onClick={() => decide('review')}>추가 검토</button>
-                {finding.dimension === 'VOICE' && canRewrite && episode && excerpt && <button className={button} onClick={() => props.onOpenRewrite({
-                  projectId, episodeId: episode.id, characterIds: [character.id],
-                  anchor: createRewriteSelectionAnchor({ manuscript: episode.content, startOffset: excerpt.startOffset, endOffset: excerpt.endOffset, sourceRevisionId: after.source.revisionId! }),
-                })}>R3 리라이팅 후보 준비</button>}
-              </div>}
-            </article>;
-          })}
-        </div>}
+            if (!excerpt || !episode || !after.source.revisionId || episode.latestRevisionId !== after.source.revisionId ||
+                computeManuscriptContentHash(episode.content) !== after.source.contentHash) return null;
+            const anchor = createRewriteSelectionAnchor({ manuscript: episode.content, startOffset: excerpt.startOffset, endOffset: excerpt.endOffset, sourceRevisionId: after.source.revisionId });
+            return <button className={button} onClick={() => props.onOpenRewrite({
+              projectId, episodeId: episode.id, characterIds: [character.id], anchor,
+            })}>R3 리라이팅 후보 준비</button>;
+          }}
+        />
       </details>
     </section>
   );

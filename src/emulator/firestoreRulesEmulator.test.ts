@@ -65,7 +65,9 @@ import {
   extractStylePromptMetadata,
 } from '../utils/authorStyleLogic.ts';
 import { analyzeAuthorStyleOnServer } from '../server/authorStyleAnalyzer.ts';
-import { analyzeCharacterVoice } from '../server/characterVoiceAnalyzer.ts';
+import { analyzeCharacterVoice, reviewCharacterContinuity } from '../server/characterVoiceAnalyzer.ts';
+import { listVoiceContinuityDecisions, saveVoiceContinuityDecision } from '../server/voiceContinuityDecisions.ts';
+import type { VoiceDecisionCommand } from '../types/voiceContinuityDecision.ts';
 import { buildApprovedVoiceContent, voiceProfileId } from '../utils/characterVoiceLogic.ts';
 import { createInitialSeedBundle } from '../utils/seedData.ts';
 import { verifyServerCanonEvidenceForRewrite } from '../server/canonEvidenceGate.ts';
@@ -2685,3 +2687,178 @@ test('Emulator Test 9 (Phase 4.3C Stage 1.1): Atomic StyleProfile + PromptProfil
   }
 });
 
+
+test('Emulator Test 11: Durable Voice Continuity Decision, CAS, Idempotency, Source Revision Binding and Tenant Isolation', async (t) => {
+  const env = assertRulesEmulatorEnv();
+  const run = `voice_decisions_${Date.now()}`;
+  const email = (role: string) => `${role}-${run}@novelforge.local`;
+  const password = 'VoiceDecisions#1881';
+  const makeUser = (role: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel: role, email: email(role), password,
+    appName: `client_${role}_${run}`, adminAppName: `admin_${role}_${run}`,
+  });
+  const owner = await makeUser('first-device');
+  const intruder = await makeUser('intruder');
+  const handle = createIsolatedTestFirestoreClient({ runId: run, projectId: env.projectId, databaseId: env.databaseId });
+  const secondApp = initializeClientApp(owner.app.options, `client_second_device_${run}`);
+  const firestore = handle.db;
+  const projectId = 'decision_project';
+  const otherProjectId = 'different_project';
+  const characterId = 'kael';
+  const otherCharacterId = 'elin';
+  const scope = { projectId, characterId };
+  const base = `users/${owner.uid}/projects/${projectId}`;
+  const seed = createInitialSeedBundle(owner.uid);
+  const project = { ...seed.project, id: projectId, ownerId: owner.uid };
+  const character = (id: string, name: string) => ({
+    ...seed.characters[0], ownerId: owner.uid, projectId, id, name, status: 'confirmed', canonStatus: 'CANON',
+  });
+  const relation = {
+    id: 'canon_relation', ownerId: owner.uid, projectId, sourceCharacterId: characterId, targetCharacterId: otherCharacterId,
+    canonStatus: 'CANON', relationType: '동맹', description: '이미 승인된 동맹',
+  };
+  const contents = [
+    ['단장님, 북문으로 향하겠습니다.', '남은 병력을 다시 배치하겠습니다.', '명령을 확인해 주시겠습니까?'],
+    ['문을 열어라.', '더는 물러서지 않아.', '성벽에서 계속 지켜봐야 해.'],
+  ].map((lines) => [
+    ...lines.map((line) => `“${line}” 카엘이 말했다.`),
+    ...Array.from({ length: 9 }, (_, i) => `${i + 1}번째 표식을 조용히 살피고 오래된 성채의 밤을 지나 횃불이 비추는 길을 천천히 건넜다.`),
+  ].join('\n\n'));
+  const fixtures = contents.map((content, index) => {
+    const episodeId = `episode_${index + 1}`;
+    const revisionId = `revision_${index + 1}`;
+    const episode = {
+      ...seed.episodes[0], id: episodeId, title: `Episode ${index + 1}`, episodeNumber: index + 1,
+      ownerId: owner.uid, projectId, latestRevisionId: revisionId, content, linkedCharacterIds: [characterId, otherCharacterId],
+    };
+    const revision = { id: revisionId, ownerId: owner.uid, projectId, episodeId, content };
+    return {
+      episode, revision, episodeRef: firestore.doc(`${base}/episodes/${episodeId}`), revisionRef: firestore.doc(`${base}/revisions/${revisionId}`),
+      input: { episodeId, revisionId, contentHash: computeManuscriptContentHash(content), sceneKind: 'DAILY' as const },
+    };
+  });
+  const characterRef = firestore.doc(`${base}/characters/${characterId}`);
+  const relationRef = firestore.doc(`${base}/relationships/${relation.id}`);
+  try {
+    const auth = getClientAuth(secondApp);
+    connectAuthEmulator(auth, `http://${env.authHost}`, { disableWarnings: true });
+    const secondUser = (await signInWithEmailAndPassword(auth, email('first-device'), password)).user;
+    const verified = await getAdminAuth(handle.app).verifyIdToken(await secondUser.getIdToken());
+    assert.equal(verified.uid, owner.uid);
+    const secondDb = connectClientFirestoreDb({ app: secondApp, ...env });
+    const otherBase = `users/${owner.uid}/projects/${otherProjectId}`;
+    await Promise.all([
+      firestore.doc(base).set(project),
+      characterRef.set(character(characterId, '카엘')),
+      firestore.doc(`${base}/characters/${otherCharacterId}`).set(character(otherCharacterId, '엘린')),
+      relationRef.set(relation),
+      firestore.doc(otherBase).set({ ...project, id: otherProjectId }),
+      firestore.doc(`${otherBase}/characters/${characterId}`).set({ ...character(characterId, '카엘'), projectId: otherProjectId }),
+      ...fixtures.flatMap((fixture) => [fixture.episodeRef.set(fixture.episode), fixture.revisionRef.set(fixture.revision)]),
+    ]);
+    const inputs = fixtures.map((fixture) => fixture.input);
+    const request = { ...scope, inputs };
+    const report = await reviewCharacterContinuity(request, owner.uid, firestore);
+    const finding = report.findings.find((entry) => entry.dimension === 'VOICE' && entry.status === 'POTENTIAL_DRIFT');
+    const identity = finding?.decisionIdentity;
+    assert.ok(identity);
+    const command: VoiceDecisionCommand = {
+      decisionId: identity.id, dimension: identity.dimension, expectedVersion: 0, decision: 'REVIEW_REQUIRED',
+      operationId: 'voice_decision_first_00', authorNote: '첫 판단',
+    };
+    const initial = await saveVoiceContinuityDecision(firestore, owner.uid, { ...request, command });
+    assert.equal(initial.status, 'COMMITTED');
+    assert.equal(initial.record.version, 1);
+    const recordPath = `${base}/voiceContinuityDecisions/${identity.id}`;
+    const auditPath = `${base}/voiceContinuityDecisionAudits/${command.operationId}`;
+
+    await t.test('VD3: the same Firebase owner restores decisions from a second authenticated client', async () => {
+      const restored = await getDoc(doc(secondDb, recordPath));
+      assert.equal(restored.data()?.decision, 'REVIEW_REQUIRED');
+      assert.deepEqual(await listVoiceContinuityDecisions(firestore, verified.uid, { ...scope, ids: [identity.id] }), { records: [initial.record] });
+      await assertPermissionDenied(() => updateDoc(doc(secondDb, recordPath), { authorNote: 'direct write' }), 'owner direct decision write');
+      await assertPermissionDenied(() => deleteDoc(doc(owner.db, recordPath)), 'owner direct decision delete');
+      await assertPermissionDenied(() => getDoc(doc(secondDb, auditPath)), 'audit access must use authenticated server');
+      await assertPermissionDenied(() => setDoc(doc(secondDb, auditPath), { version: 9 }), 'owner direct audit overwrite');
+    });
+    await t.test('VD4: another Firebase user cannot read or write the decision', async () => {
+      await assertPermissionDenied(() => getDoc(doc(intruder.db, recordPath)), 'foreign user decision read');
+      await assertPermissionDenied(() => setDoc(doc(intruder.db, recordPath), { version: 9 }), 'foreign user decision write');
+      await assert.rejects(listVoiceContinuityDecisions(firestore, intruder.uid, scope), { status: 403 });
+      await assert.rejects(saveVoiceContinuityDecision(firestore, intruder.uid, { ...request, command }), { status: 403 });
+    });
+    await t.test('VD5: a different project owned by the same account cannot use these sources or audit', async () => {
+      const otherScope = { ...scope, projectId: otherProjectId };
+      assert.deepEqual(await listVoiceContinuityDecisions(firestore, owner.uid, { ...otherScope, ids: [identity.id] }), { records: [] });
+      await assert.rejects(listVoiceContinuityDecisions(firestore, owner.uid, { ...otherScope, historyFor: identity.id }), { status: 404 });
+      await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, { ...request, ...otherScope, command }), { code: 'STALE_SOURCE' });
+    });
+    await t.test('VD6: another character in the project cannot substitute its identity', async () => {
+      const otherScope = { ...scope, characterId: otherCharacterId };
+      await assert.rejects(listVoiceContinuityDecisions(firestore, owner.uid, { ...otherScope, ids: [identity.id] }), { status: 403 });
+      await assert.rejects(listVoiceContinuityDecisions(firestore, owner.uid, { ...otherScope, historyFor: identity.id }), { status: 403 });
+      await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, {
+        ...request, ...otherScope, command: { ...command, operationId: 'voice_decision_other_01' },
+      }), { code: 'STALE_SOURCE' });
+    });
+
+    const competing = [
+      { ...command, expectedVersion: 1, operationId: 'voice_decision_update_01', authorNote: '첫 기기', decision: 'INTENDED_VARIATION' as const },
+      { ...command, expectedVersion: 1, operationId: 'voice_decision_update_02', authorNote: '다른 기기' },
+    ];
+    const races = await Promise.allSettled(competing.map((update, index) =>
+      saveVoiceContinuityDecision(firestore, index === 0 ? owner.uid : verified.uid, { ...request, command: update })));
+    const winners = races.flatMap((result, index) => result.status === 'fulfilled' ? [{ result: result.value, command: competing[index] }] : []);
+    assert.equal(winners.length, 1);
+    const winner = winners[0];
+    const loser = races.find((result) => result.status === 'rejected');
+    assert.equal(loser?.reason.code, 'VERSION_CONFLICT');
+    assert.equal(winner.result.record.version, 2);
+    assert.deepEqual(await saveVoiceContinuityDecision(firestore, owner.uid, { ...request, command: winner.command }), {
+      status: 'ALREADY_APPLIED', record: winner.result.record,
+    });
+    assert.deepEqual(await saveVoiceContinuityDecision(firestore, owner.uid, { ...request, command }), {
+      status: 'ALREADY_APPLIED', record: initial.record,
+    });
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, { ...request, command, inputs: [...inputs].reverse() }),
+      { code: 'OPERATION_CONFLICT' });
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, {
+      ...request, command: { ...winner.command, authorNote: '다른 데이터' },
+    }), { code: 'OPERATION_CONFLICT' });
+    const audit = await listVoiceContinuityDecisions(firestore, verified.uid, { ...scope, historyFor: identity.id });
+    assert.ok('entries' in audit);
+    assert.equal(audit.entries.length, 2);
+    const finalAudit = audit.entries.find((entry) => entry.record.version === 2);
+    assert.equal(finalAudit?.previousDecision, initial.record.decision);
+    assert.deepEqual(finalAudit?.record, winner.result.record);
+
+    const nextCommand = { ...command, expectedVersion: 2, operationId: 'voice_decision_stale_01' };
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, {
+      ...request, command: nextCommand, inputs: [inputs[0], { ...inputs[1], contentHash: computeManuscriptContentHash('forged') }],
+    }), /STALE_SOURCE/);
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, {
+      ...request, command: nextCommand, inputs: [inputs[0], { ...inputs[1], revisionId: inputs[0].revisionId }],
+    }), { status: 403 });
+    for (const fixture of fixtures) {
+      assert.deepEqual((await fixture.episodeRef.get()).data(), fixture.episode);
+      assert.deepEqual((await fixture.revisionRef.get()).data(), fixture.revision);
+    }
+    assert.deepEqual((await characterRef.get()).data(), character(characterId, '카엘'));
+    assert.deepEqual((await relationRef.get()).data(), relation);
+
+    const newRevision = { ...fixtures[1].revision, id: 'revision_3' };
+    await firestore.doc(`${base}/revisions/${newRevision.id}`).set(newRevision);
+    await fixtures[1].episodeRef.update({ latestRevisionId: newRevision.id });
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, { ...request, command: nextCommand }), { code: 'STALE_SOURCE' });
+    await assert.rejects(saveVoiceContinuityDecision(firestore, owner.uid, {
+      ...request, command: nextCommand, inputs: [inputs[0], { ...inputs[1], revisionId: newRevision.id }],
+    }), { code: 'STALE_SOURCE' });
+    const history = await listVoiceContinuityDecisions(firestore, verified.uid, scope);
+    assert.ok('records' in history);
+    assert.deepEqual(history.records, [winner.result.record]);
+    assert.equal((await firestore.collection(`${base}/voiceContinuityDecisionAudits`).get()).size, 2);
+  } finally {
+    await firestore.recursiveDelete(firestore.doc(`users/${owner.uid}`));
+    await Promise.all([owner.cleanup(), intruder.cleanup(), deleteClientApp(secondApp), handle.cleanup()]);
+  }
+});

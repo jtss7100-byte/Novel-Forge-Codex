@@ -960,6 +960,36 @@ service cloud.firestore {
           (exists(target) && get(target).data.ownerId == uid && get(target).data.projectId == projectId && get(target).data.id == targetId);
       }
 
+      match /voiceContinuityDecisions/{decisionId} {
+        function isOwnedDecision() {
+          let data = resource.data;
+          let character = /databases/$(database)/documents/users/$(uid)/projects/$(projectId)/characters/$(data.characterId);
+          let fields = ['id', 'ownerId', 'projectId', 'characterId', 'beforeEpisodeId',
+            'beforeRevisionId', 'beforeContentHash', 'afterEpisodeId', 'afterRevisionId', 'afterContentHash',
+            'dimension', 'analysisVersion', 'analysisFingerprint', 'decision', 'authorNote', 'version', 'createdAt', 'updatedAt'];
+          return data.keys().hasOnly(fields) && data.keys().hasAll(fields) &&
+            data.id == decisionId && data.ownerId == uid && data.projectId == projectId &&
+            isValidId(data.characterId) && exists(character) &&
+            get(character).data.ownerId == uid && get(character).data.projectId == projectId &&
+            get(character).data.id == data.characterId &&
+            isValidId(data.beforeEpisodeId) && isValidId(data.beforeRevisionId) &&
+            isValidId(data.afterEpisodeId) && isValidId(data.afterRevisionId) &&
+            data.beforeContentHash.matches('^sha256_[a-f0-9]{64}$') && data.afterContentHash.matches('^sha256_[a-f0-9]{64}$') &&
+            isValidId(data.analysisVersion) && data.analysisFingerprint.matches('^sha256_[a-f0-9]{64}$') &&
+            data.dimension in ['SENTENCE', 'PARAGRAPH', 'DIALOGUE', 'PSYCHOLOGY', 'DISTANCE', 'POV', 'VOICE', 'TRANSITION'] &&
+            data.decision in ['INTENDED_VARIATION', 'REVIEW_REQUIRED'] && data.version is int && data.version > 0 &&
+            data.authorNote is string && data.authorNote.size() <= 1000 && data.createdAt is timestamp && data.updatedAt is timestamp;
+        }
+        allow get: if isOwner(uid) && decisionId.matches('^vcd_[a-f0-9]{64}$') &&
+          isParentProjectOwner(uid, projectId) && isOwnedDecision();
+        // Only the authenticated server transaction can re-read and hash Revisions before writing.
+        allow list, create, update, delete: if false;
+      }
+
+      match /voiceContinuityDecisionAudits/{operationId} {
+        allow read, write: if false;
+      }
+
       // WritingPromptProfiles Subcollection (Phase 2 & Phase 4.3C Stage 1.1 Atomic CAS)
       match /writingPromptProfiles/{profileId} {
         allow get: if isOwner(uid) && isValidId(uid) && isValidId(projectId) && isValidId(profileId) &&

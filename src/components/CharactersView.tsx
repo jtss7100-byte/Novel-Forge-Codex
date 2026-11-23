@@ -184,7 +184,7 @@ export const CharactersView: React.FC<CharactersViewProps> = ({
     <div className="space-y-6">
       {voiceCharacter && <div id="character-voice-workspace">
         <button type="button" className="mb-2 text-sm text-slate-300 hover:text-amber-300" onClick={() => setVoiceCharacterId(undefined)}>화법 작업 닫기</button>
-        <CharacterVoicePanel key={voiceCharacter.id} {...voiceWorkspace} character={voiceCharacter} characters={characters} episodes={episodes} />
+        <CharacterVoicePanel key={`${voiceWorkspace.cloud}:${voiceWorkspace.ownerId}:${voiceWorkspace.projectId}:${voiceCharacter.id}`} {...voiceWorkspace} character={voiceCharacter} characters={characters} episodes={episodes} />
       </div>}
       {/* Header & Search / Status Filter Bar */}
       <div className="flex flex-col justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5 lg:flex-row lg:items-center">

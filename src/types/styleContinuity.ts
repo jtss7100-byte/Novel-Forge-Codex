@@ -1,5 +1,6 @@
 import type { VoiceMetrics, VoiceSourceReference, VoiceExcerpt } from './characterVoice';
 import type { DeterministicStyleMetrics } from './authorStyle';
+import type { VoiceContinuityIdentity } from './voiceContinuityDecision';
 
 export type StyleContinuityFindingStatus = 'CONSISTENT' | 'INTENTIONAL_VARIATION' | 'POTENTIAL_DRIFT' | 'INSUFFICIENT_EVIDENCE';
 export type ContinuitySceneKind = 'UNKNOWN' | 'DAILY' | 'COMBAT' | 'CRISIS' | 'REFLECTION';
@@ -22,6 +23,7 @@ export interface ContinuityFinding {
   confidence: 'LOW' | 'MEDIUM';
   before: number;
   after: number;
+  decisionIdentity?: VoiceContinuityIdentity;
 }
 export interface StyleContinuityReport {
   samples: ContinuitySample[];
