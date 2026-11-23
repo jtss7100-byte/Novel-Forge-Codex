@@ -377,6 +377,11 @@ export function hasCloudFirestoreCredentials(): boolean {
   );
 }
 
+function isLoopbackEmulatorHost(host: string | undefined): boolean {
+  const port = /^(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})$/i.exec(host ?? '')?.[1];
+  return port !== undefined && Number(port) > 0 && Number(port) <= 65535;
+}
+
 export function ensureFirebaseAdminInitialized(): string {
   const projectId = getFirebaseProjectId();
   const defaultAppExists = getApps().some((a) => a.name === '[DEFAULT]');
@@ -398,6 +403,19 @@ export async function verifyBearerToken(authHeader?: string): Promise<{
   const token = authHeader.slice('Bearer '.length).trim();
   if (!token) {
     return { verified: false, error: '빈 인증 토큰입니다.' };
+  }
+
+  // The Auth emulator accepts unsigned tokens. Keep those tokens away from cloud Firestore.
+  if (
+    process.env.FIREBASE_AUTH_EMULATOR_HOST &&
+    (process.env.NODE_ENV === 'production' ||
+      !isLoopbackEmulatorHost(process.env.FIREBASE_AUTH_EMULATOR_HOST) ||
+      !isLoopbackEmulatorHost(process.env.FIRESTORE_EMULATOR_HOST))
+  ) {
+    return {
+      verified: false,
+      error: '[AUTH_EMULATOR_ISOLATION_REQUIRED] Firebase Auth 에뮬레이터는 개발 모드에서 로컬 Firestore 에뮬레이터와 함께 사용할 때만 허용됩니다.',
+    };
   }
 
   try {
@@ -451,7 +469,9 @@ export function isServerCloudAuthEnforced(): boolean {
     process.env.NODE_ENV === 'production' ||
     process.env.NOVELFORGE_ENFORCE_CLOUD_AUTH === 'true' ||
     process.env.NOVEL_FORGE_ENFORCE_CLOUD_AUTH === 'true' ||
-    process.env.SERVER_FORCE_CLOUD_AUTH === 'true'
+    process.env.SERVER_FORCE_CLOUD_AUTH === 'true' ||
+    (hasCloudFirestoreCredentials() &&
+      !isLoopbackEmulatorHost(process.env.FIRESTORE_EMULATOR_HOST))
   );
 }
 
