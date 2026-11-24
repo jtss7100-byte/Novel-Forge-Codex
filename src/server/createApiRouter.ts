@@ -24,6 +24,7 @@ import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinui
 import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
 import { cancelEvaluationSession, evaluationCancelInput, evaluationOperationId, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
 import { NovelWritingEvaluationSessions } from './novelWritingEvaluationSessions';
+import { getEvaluationPilotPreflight } from './novelWritingEvaluationPilot';
 import {
   executeServerManuscriptExtraction,
   saveVerifiedExtractionProposalsOnServer,
@@ -589,6 +590,14 @@ export function createApiRouter(): express.Router {
     }
   };
   app.get('/api/novel-writing-evaluation/settings', novelEvaluation);
+  app.get('/api/novel-writing-evaluation/preflight', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const owner = await resolveRequestOwner(req);
+    res.json(await getEvaluationPilotPreflight({
+      authenticated: owner.ok && owner.isAuthenticatedCloud,
+      readStorage: () => new NovelWritingEvaluationSessions(getVoiceFirestore()).initialPilotCompleted(owner.ownerId),
+    }));
+  });
   app.get(['/api/novel-writing-evaluation/sessions', '/api/novel-writing-evaluation/sessions/:id'], novelEvaluation);
   app.post(['/api/novel-writing-evaluation/run', '/api/novel-writing-evaluation/cancel', '/api/novel-writing-evaluation/review'], novelEvaluation);
 

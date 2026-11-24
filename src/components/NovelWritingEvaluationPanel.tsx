@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from '../server/novelWritingEvaluationRunner';
 import type { DurableEvaluationDetail } from '../server/novelWritingEvaluationSessions';
-import { EVALUATION_SCENARIOS, REVIEW_DIMENSIONS, type EvaluationRating, type EvaluationScenarioId, type EvaluationSessionHeader, type EvaluationSettings, type EvaluationTreatment, type ReviewChoice } from '../types/novelWritingEvaluation';
+import type { getEvaluationPilotPreflight } from '../server/novelWritingEvaluationPilot';
+import { EVALUATION_SCENARIOS, LIVE_EVALUATION_CALLS, LIVE_EVALUATION_FIRST_SCENARIO, REVIEW_DIMENSIONS, type EvaluationRating, type EvaluationScenarioId, type EvaluationSessionHeader, type EvaluationSettings, type EvaluationTreatment, type ReviewChoice } from '../types/novelWritingEvaluation';
+import { exportNovelWritingEvaluation, pilotPreference } from '../utils/novelWritingEvaluationExport';
 
 type Settings = ReturnType<typeof getEvaluationSettings>;
 type BlindRun = Awaited<ReturnType<typeof startEvaluationSession>> | DurableEvaluationDetail;
 type Report = ReturnType<typeof finalizeEvaluationSession>;
 type HistoryPage = { entries: EvaluationSessionHeader[]; next?: string };
+type Preflight = Awaited<ReturnType<typeof getEvaluationPilotPreflight>>;
 
 const button = 'rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:border-amber-400 disabled:opacity-50';
 const input = 'rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100';
@@ -22,7 +25,9 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
   const [treatment, setTreatment] = useState<EvaluationTreatment>('STYLE_AND_VOICE');
   const [mode, setMode] = useState<EvaluationSettings['mode']>('DRY_RUN_FIXTURE');
   const [repeats, setRepeats] = useState(1);
-  const [budget, setBudget] = useState(4);
+  const [preflight, setPreflight] = useState<Preflight>();
+  const [checking, setChecking] = useState(false);
+  const [pilotScenario, setPilotScenario] = useState<EvaluationScenarioId>(LIVE_EVALUATION_FIRST_SCENARIO);
   const [optIn, setOptIn] = useState(false);
   const [run, setRun] = useState<BlindRun>();
   const [report, setReport] = useState<Report>();
@@ -37,7 +42,7 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
   const reviewAttempt = useRef<{ key: string; id: string } | undefined>(undefined);
   const lock = useRef(false);
   const live = mode === 'LIVE_GEMINI';
-  const expected = live ? scenarios.length * repeats * 4 : 0;
+  const expected = live ? LIVE_EVALUATION_CALLS : 0;
   const cloudRun = run && 'status' in run ? run : undefined;
   const waiting = cloudRun?.status === 'RUNNING' || cloudRun?.status === 'CREATED';
 
@@ -52,6 +57,18 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
     if (!response.ok) throw new Error(result.error ?? 'EVALUATION_FAILED');
     return result as T;
   }, [getIdToken]);
+
+  async function checkPilot() {
+    setChecking(true); setError(''); setOptIn(false);
+    try {
+      const result = await request<Preflight>('preflight');
+      setPreflight(result);
+      setPilotScenario((selected) => result.eligibleScenarios.some((scene) => scene === selected) ? selected : LIVE_EVALUATION_FIRST_SCENARIO);
+    } catch (caught) {
+      setPreflight(undefined);
+      setError(caught instanceof Error ? caught.message : 'PILOT_PREFLIGHT_UNAVAILABLE');
+    } finally { setChecking(false); }
+  }
 
   const applyCloud = useCallback((next: DurableEvaluationDetail, keepDraft = false) => {
     setRun(next); setReport(next.report);
@@ -103,10 +120,11 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
 
   async function start() {
     if (lock.current || !settings) return;
+    if (live && (preflight?.status !== 'PASS' || !optIn)) return;
     lock.current = true;
-    const payload = {
-      scenarios, treatment, repeats, mode, optIn: live && optIn, ...(live ? { callBudget: budget } : {}),
-    };
+    const payload = live
+      ? { scenarios: [pilotScenario], treatment: 'STYLE_AND_VOICE', repeats: 1, mode, optIn, callBudget: LIVE_EVALUATION_CALLS }
+      : { scenarios, treatment, repeats, mode, optIn: false };
     const key = JSON.stringify(payload);
     if (attempt.current?.key !== key) attempt.current = { key, id: crypto.randomUUID() };
     const operationId = attempt.current.id;
@@ -169,6 +187,20 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
     <div className="mt-4 space-y-4 text-sm text-slate-200">
       {error && <p role="alert" className="text-rose-300">{error === 'VERSION_CONFLICT' ? '다른 기기가 먼저 리뷰를 저장했습니다. 최신 상태를 불러와 변경 내용을 확인하세요.' : error}</p>}
       {message && <p role="status">{message}</p>}
+      {!run && <div className="rounded-lg border border-slate-800 p-3">
+        <button type="button" className={button} disabled={checking || busy} onClick={() => void checkPilot()}>
+          {checking ? '사전 점검 중…' : 'Live Gemini 평가 사전 점검'}
+        </button>
+        {preflight && <div className="mt-2 space-y-1 text-xs" role="status">
+          <p>{preflight.status} · 모델 {preflight.modelId} · Google GenAI SDK {preflight.sdkVersion}</p>
+          <p>Firebase 인증 {preflight.authenticated ? '확인' : '필요'} · Firestore 서버 읽기 {preflight.storage} · 평가 전용 저장소</p>
+          <p>API 키 {preflight.apiKeyPresent ? '설정됨' : '미설정'} · 라이브 스위치 {preflight.liveEnabled ? 'ON' : 'OFF'} · 데이터셋 승인 {preflight.datasetApproved ? '일치' : '미확인'}</p>
+          <p>모델 메타데이터 {preflight.modelMetadata.status} · 실제 JSON 호환성 {preflight.modelCapability} · 구조화 JSON 설정 {preflight.structuredOutputConfigured ? '확인' : '미확인'}</p>
+          <p>합성 데이터셋 {preflight.datasetVersion} · 무결성 {preflight.datasetIntegrity ? 'PASS' : 'FAIL'}</p>
+          <p>목표 {preflight.targetLength}자 · 출력 한도 {preflight.generationSettings.maxOutputTokens}토큰 · temperature {preflight.generationSettings.temperature} · topP {preflight.generationSettings.topP}</p>
+          <p>계획 {preflight.requiredBudget}호출 · 사전 점검에서 생성 호출 {preflight.generationCalls}건 · 예상 비용 {preflight.estimatedCost}</p>
+        </div>}
+      </div>}
       {settings?.durable && <details className="rounded-lg border border-slate-800 p-3">
         <summary>평가 기록</summary>
         <button type="button" className={button + ' mt-2'} disabled={busy} onClick={() => void loadHistory()}>평가 기록 새로고침</button>
@@ -187,22 +219,22 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
       {!run && <>
         <fieldset disabled={busy} className="space-y-3">
           <legend className="sr-only">평가 설정</legend>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {!live && <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {EVALUATION_SCENARIOS.map(([id, title]) => <label key={id} className="flex gap-2">
               <input type="checkbox" checked={scenarios.includes(id)} onChange={(event) =>
                 setScenarios(event.target.checked ? [...scenarios, id] : scenarios.filter((scenario) => scenario !== id))} />
               {title}
             </label>)}
-          </div>
+          </div>}
           <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2">비교 조건
+            {!live && <label className="flex items-center gap-2">비교 조건
               <select className={input} value={treatment} onChange={(event) => setTreatment(event.target.value as EvaluationTreatment)}>
                 {Object.entries(treatmentLabel).map(([id, title]) => <option key={id} value={id}>공통 규칙 ↔ {title}</option>)}
               </select>
-            </label>
-            <label className="flex items-center gap-2">평가 반복
+            </label>}
+            {!live && <label className="flex items-center gap-2">평가 반복
               <input className={input + ' w-16'} type="number" min={1} max={settings?.maxRepeats ?? 4} value={repeats} onChange={(event) => setRepeats(Number(event.target.value))} />
-            </label>
+            </label>}
             <label className="flex items-center gap-2">실행 모드
               <select className={input} value={mode} onChange={(event) => { setMode(event.target.value as EvaluationSettings['mode']); setOptIn(false); }}>
                 <option value="DRY_RUN_FIXTURE">합성 원고로 검증</option>
@@ -211,10 +243,14 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
             </label>
           </div>
           {live && <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2">호출 예산
-              <input className={input + ' w-16'} type="number" min={1} max={settings?.maxCalls} value={budget} onChange={(event) => setBudget(Number(event.target.value))} />
+            <label className="flex items-center gap-2">파일럿 장면
+              <select className={input} value={pilotScenario} onChange={(event) => { setPilotScenario(event.target.value as EvaluationScenarioId); setOptIn(false); }}>
+                {EVALUATION_SCENARIOS.filter(([id]) => (preflight?.eligibleScenarios ?? [LIVE_EVALUATION_FIRST_SCENARIO]).some((eligible) => eligible === id))
+                  .map(([id, title]) => <option key={id} value={id}>{id} · {title}</option>)}
+              </select>
             </label>
-            <label><input type="checkbox" checked={optIn} onChange={(event) => setOptIn(event.target.checked)} /> 합성 데이터의 Gemini 전송 및 비용 발생에 동의</label>
+            <p>공통 규칙 ↔ 문체 + 인물 화법 · 장면 1개 · 반복 1회 · 생성 2회와 채점 2회</p>
+            <label><input type="checkbox" checked={optIn} disabled={preflight?.status !== 'PASS'} onChange={(event) => setOptIn(event.target.checked)} /> 합성 데이터 전송 및 최대 4회 Gemini 호출의 비용 발생에 동의</label>
           </div>}
         </fieldset>
         <dl className="grid gap-1 text-xs text-slate-300 sm:grid-cols-2">
@@ -225,9 +261,9 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
         </dl>
         <p className="text-xs text-slate-400">{settings?.durable ? '평가와 리뷰를 Firebase 계정에 저장합니다.' : '로컬 평가와 리뷰는 서버의 임시 세션에 보관됩니다.'}</p>
         <div className="flex gap-2">
-          <button type="button" className={button} disabled={busy || !settings || !scenarios.length || !Number.isInteger(repeats) ||
-            repeats < 1 || repeats > settings.maxRepeats || (live && (!settings.liveAvailable || !optIn || !Number.isInteger(budget) || budget > settings.maxCalls || budget < expected))}
-            onClick={() => void start()}>{active ? '평가 진행 중…' : 'A/B 평가 시작'}</button>
+          <button type="button" className={button} disabled={busy || checking || !settings || (live ? (!settings.liveAvailable || !optIn || preflight?.status !== 'PASS') :
+            (!scenarios.length || !Number.isInteger(repeats) || repeats < 1 || repeats > settings.maxRepeats))}
+            onClick={() => void start()}>{active ? '평가 진행 중…' : live ? '라이브 파일럿 승인 및 시작' : 'A/B 평가 시작'}</button>
           {active && <button type="button" className={button} disabled={stopping} onClick={() => void cancel()}>{stopping ? '중단 중…' : '중단'}</button>}
         </div>
       </>}
@@ -291,10 +327,10 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
           <button type="button" className={button} disabled={busy} onClick={() => void saveReview(true)}>리뷰 확정 및 결과 보기</button>
         </div>}
         {report && <>
-          <EvaluationResults report={report} />
+          <EvaluationResults report={report} session={cloudRun} />
           <button type="button" className={button} onClick={() => {
             attempt.current = undefined; reviewAttempt.current = undefined;
-            setRun(undefined); setReport(undefined); setRatings({}); setOptIn(false); setError(''); setMessage('');
+            setRun(undefined); setReport(undefined); setRatings({}); setOptIn(false); setPreflight(undefined); setError(''); setMessage('');
           }}>새 평가</button>
         </>}
       </>}
@@ -302,12 +338,14 @@ export function NovelWritingEvaluationPanel({ getIdToken }: { getIdToken: () => 
   </details>;
 }
 
-function EvaluationResults({ report }: { report: Report }) {
+function EvaluationResults({ report, session }: { report: Report; session?: EvaluationSessionHeader }) {
   const { summary, telemetry } = report;
   const decisive = summary.human.originalPreferredCount + summary.human.rewritePreferredCount;
   const signals = Object.entries(summary.integrity.baseline);
   return <section aria-label="평가 결과" className="space-y-3 border-t border-slate-700 pt-3">
     <h3 className="font-semibold">평가 결과</h3>
+    {session && <p className="text-xs">평가 ID {session.operationId} · 데이터셋 {session.datasetVersion} · {new Date(session.completedAt ?? session.createdAt).toLocaleString('ko-KR')}</p>}
+    {report.mode === 'LIVE_GEMINI' && <p>파일럿 장면 1개 · {pilotPreference(summary.human)} · 통계적 유의성 NOT_ESTABLISHED</p>}
     <p className="text-slate-300">{report.mode === 'DRY_RUN_FIXTURE'
       ? 'FIXTURE · 고정 응답으로 평가 절차를 확인했습니다.'
       : 'Q1~Q8은 동일 모델의 보조 평가입니다. 표본 수와 점수만으로 품질 향상을 확정할 수 없습니다.'}</p>
@@ -316,8 +354,14 @@ function EvaluationResults({ report }: { report: Report }) {
     <p>적용 조건 승률 {summary.human.rewriteWinRateExcludingTiesPercent === null ? '미집계' : `${summary.human.rewriteWinRateExcludingTiesPercent}% (${decisive}건 기준)`}</p>
     <p>작가 문체 준수도 평균 차이 {number(summary.authorStyle.meanDelta)}점 · {summary.authorStyle.samples}쌍</p>
     <p>Character Voice 준수도 평균 차이 {number(summary.characterVoice.meanDelta)}점 · {summary.characterVoice.samples}쌍</p>
-    <p>Gemini 호출 {telemetry.actualCalls}/{telemetry.plannedCalls}건 · 생성 {telemetry.generationCalls} · 평가 {telemetry.qualityCalls} · 측정 토큰 {number(telemetry.measuredTokens)} · 사용량 미확인 {telemetry.callsWithoutUsage}건</p>
-    <p>소요 시간 {number(telemetry.latencyMs / 1000)}초 · 추정 비용 {telemetry.estimatedCostUsd === null ? '미집계' : `USD ${telemetry.estimatedCostUsd}`}</p>
+    <p>Gemini 호출 {telemetry.dispatchedCalls ?? 'UNKNOWN'}/{telemetry.plannedCalls}건 · 전송 경로 {telemetry.transport ?? 'UNKNOWN'} · 예약 {telemetry.actualCalls}건 · 응답 {telemetry.receivedResponses ?? 'UNKNOWN'}건 · 측정 토큰 {number(telemetry.measuredTokens)} · 사용량 미확인 {telemetry.callsWithoutUsage}건</p>
+    <p>소요 시간 {number(telemetry.latencyMs / 1000)}초 · 추정 비용 {telemetry.estimatedCostUsd === null ? 'UNKNOWN' : `USD ${telemetry.estimatedCostUsd}`}</p>
+    {session && <button type="button" className={button} onClick={() => {
+      const file = URL.createObjectURL(new Blob([exportNovelWritingEvaluation(report, session)], { type: 'text/markdown;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = file; link.download = `novel-evaluation-${session.operationId}.md`; link.click();
+      setTimeout(() => URL.revokeObjectURL(file), 1000);
+    }}>공유용 Markdown 내보내기</button>}
     <p className="text-xs text-slate-400">실제 청구액은 집계 대상에 포함되지 않습니다. 무결성 표는 합성 시나리오의 규칙과 Writer 자체 점검으로 탐지한 신호입니다.</p>
     {telemetry.pricingReference && <a href={telemetry.pricingReference} target="_blank" rel="noreferrer" className="text-sky-300 underline">추정 단가 출처</a>}
     <div className="overflow-x-auto">
@@ -339,6 +383,11 @@ function EvaluationResults({ report }: { report: Report }) {
       {entry.baseline.observedModelVersion && <p>응답 모델 버전 · 공통 {entry.baseline.observedModelVersion} / 적용 {entry.treatment.observedModelVersion ?? '미확인'}</p>}
       <p>공통 / 적용 품질 점수 {summary.deltas.map(({ dimension }) => `${dimension} ${number(entry.baseline.scores[dimension])}/${number(entry.treatment.scores[dimension])}`).join(' · ')}</p>
       <p>채점 상태 {entry.baseline.qualityFailure ?? entry.baseline.qualityStatus} / {entry.treatment.qualityFailure ?? entry.treatment.qualityStatus}</p>
+      <p className="break-all">품질 기준 {entry.manifest.qualityCriteriaFingerprint} · 통제 조건 {entry.manifest.controlsFingerprint}</p>
+      {([['기본', entry.baseline], ['적용', entry.treatment]] as const).map(([label, arm]) => <p className="break-all" key={label}>
+        {label} · 집필 {arm.writerResponse?.code ?? arm.status} · 종료 {arm.writerResponse?.finishReason ?? '미확인'} · JSON {arm.writerResponse?.json ?? '미확인'} · 스키마 {arm.writerResponse?.schema ?? '미확인'} · 프롬프트 {arm.promptHash ?? '미생성'}
+        {arm.withinTargetLength !== undefined && (arm.withinTargetLength ? ' · 목표 분량 범위 충족' : ' · 목표 분량 범위 벗어남')}
+      </p>)}
       {(['authorStyleAdherence', 'characterVoiceAdherence'] as const).map((key) => <p key={key}>
         {key === 'authorStyleAdherence' ? '작가 문체 준수' : '인물 화법 준수'} · {[entry.baseline[key], entry.treatment[key]].map((value) =>
           value ? `${number(value.score)} (${value.status}, ${value.confidence})` : '미측정').join(' / ')}

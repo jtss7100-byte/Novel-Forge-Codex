@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { CollectionReference, DocumentReference, DocumentSnapshot, Firestore, Transaction } from 'firebase-admin/firestore';
 import { z } from 'zod';
-import { EVALUATION_DIMENSIONS, EVALUATION_INTEGRITY_CODES, EVALUATION_SESSION_STATUSES, type EvaluationCase, type EvaluationSessionHeader, type EvaluationSessionStatus, type EvaluationSettings } from '../types/novelWritingEvaluation';
+import { EVALUATION_DIMENSIONS, EVALUATION_INTEGRITY_CODES, EVALUATION_RESPONSE_CODES, EVALUATION_SESSION_STATUSES, LIVE_EVALUATION_FIRST_SCENARIO, type EvaluationCase, type EvaluationSessionHeader, type EvaluationSessionStatus, type EvaluationSettings } from '../types/novelWritingEvaluation';
 import { EVALUATION_DATASET_VERSION } from '../utils/novelWritingEvaluationBenchmark';
 import { evaluationFingerprint, type HiddenEvaluationPair } from '../utils/novelWritingEvaluationLogic';
 import { assertEvaluationLiveBudget, evaluationModelSettings, evaluationOperationId, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, getEvaluationSettings, plannedEvaluationCalls, revealEvaluationReport, runWritingEvaluation, validateEvaluationRatings, type EvaluationModelCall, type EvaluationRunJournal, type EvaluationRunReport } from './novelWritingEvaluationRunner';
+import { assertEvaluationPilotScope, verifyEvaluationPilotModel } from './novelWritingEvaluationPilot';
 
 const leaseMs = 120_000;
 const id = z.string().min(1).max(128).regex(/^[^/]+$/);
@@ -15,6 +16,8 @@ const telemetry = z.object({
   generationCalls: z.number().int().nonnegative(), qualityCalls: z.number().int().nonnegative(),
   measuredTokens: z.number().nonnegative(), callsWithoutUsage: z.number().int().nonnegative(),
   estimatedCostUsd: z.number().nonnegative().nullable(), latencyMs: z.number().nonnegative(), pricingReference: z.url().optional(),
+  transport: z.enum(['GEMINI', 'TEST_TRANSPORT', 'FIXTURE']).optional(),
+  dispatchedCalls: z.number().int().nonnegative().optional(), receivedResponses: z.number().int().nonnegative().optional(),
 });
 const sessionSchema = z.strictObject({
   schemaVersion: z.literal(1), ownerId: id, operationId: evaluationOperationId, fingerprint: hash,
@@ -25,6 +28,7 @@ const sessionSchema = z.strictObject({
   pendingCall: z.number().int().positive().nullable(), uncertain: z.boolean(), cancelRequested: z.boolean(),
   telemetry, createdAt: date, updatedAt: date, completedAt: date.nullable(), reason: z.string().nullable(),
   ratings: evaluationReviewInput.shape.ratings,
+  pilotCompleted: z.literal(true).optional(),
 });
 type Session = z.infer<typeof sessionSchema>;
 type ReviewCommand = z.infer<typeof evaluationReviewInput>;
@@ -34,6 +38,13 @@ const trace = z.object({
   active: z.literal(true), approval: z.literal('APPROVED_SYNTHETIC_FIXTURE'),
 });
 const score = z.number().min(0).max(100).nullable();
+const tokenCount = z.number().int().nonnegative().optional();
+const responseTrace = z.object({
+  code: z.enum(EVALUATION_RESPONSE_CODES), finishReason: z.string().optional(),
+  json: z.enum(['VALID', 'INVALID']).optional(), schema: z.enum(['VALID', 'INVALID']).optional(),
+  manuscriptState: z.enum(['DRAFT_READY', 'BLOCKED_CONFLICT', 'BLOCKED_MISSING_INFO']).optional(),
+  usage: z.object({ prompt: tokenCount, output: tokenCount, thinking: tokenCount, total: tokenCount }).optional(),
+});
 const adherence = z.object({
   score, confidence: z.enum(['LOW', 'MEDIUM']), status: z.enum(['FIXTURE', 'HEURISTIC', 'INSUFFICIENT_EVIDENCE']),
   rubricVersion: z.string(), targets: z.array(trace), evidence: z.array(z.object({
@@ -42,10 +53,12 @@ const adherence = z.object({
 });
 const candidate = z.object({
   status: z.string(), issues: z.array(z.enum(EVALUATION_INTEGRITY_CODES)), chars: z.number().int().nonnegative(),
+  withinTargetLength: z.boolean().optional(),
   scores: z.partialRecord(z.enum(EVALUATION_DIMENSIONS), score), qualityStatus: z.enum(['NOT_EVALUATED', 'FIXTURE', 'AI_AUXILIARY', 'FAILED']),
   style: z.array(trace), voice: z.array(trace), promptHash: hash.optional(), observedModelVersion: z.string().optional(),
   qualityFailure: z.string().optional(), observedQualityModelVersion: z.string().optional(),
   authorStyleAdherence: adherence.optional(), characterVoiceAdherence: adherence.optional(),
+  writerResponse: responseTrace.optional(), qualityResponse: responseTrace.optional(),
 });
 const scenarioId = evaluationRunInput.shape.scenarios.element;
 const maxCandidateLength = 50_000;
@@ -159,6 +172,22 @@ export class NovelWritingEvaluationSessions {
     return this.collection(ownerId).doc(evaluationOperationId.parse(operationId));
   }
 
+  async initialPilotCompleted(ownerId: string, tx?: Transaction) {
+    const query = this.collection(ownerId).where('pilotCompleted', '==', true).limit(1);
+    const doc = (await (tx ? tx.get(query) : query.get())).docs[0];
+    if (!doc) return false;
+    const record = readSession(doc, ownerId);
+    return record.status === 'FINALIZED' && record.settings.mode === 'LIVE_GEMINI' &&
+      record.settings.scenarios.length === 1 && record.settings.scenarios[0] === LIVE_EVALUATION_FIRST_SCENARIO;
+  }
+
+  private async assertPilotAdmission(ownerId: string, settings: EvaluationSettings, tx?: Transaction) {
+    if (settings.mode !== 'LIVE_GEMINI') return;
+    assertEvaluationLiveBudget(settings, true);
+    const initialCompleted = settings.scenarios[0] !== LIVE_EVALUATION_FIRST_SCENARIO && await this.initialPilotCompleted(ownerId, tx);
+    assertEvaluationPilotScope(settings, initialCompleted);
+  }
+
   private change(tx: Transaction, ref: DocumentReference, current: Session, patch: Partial<Session>, action: string): Session {
     if (patch.status && !canTransitionEvaluation(current.status, patch.status)) {
       throw new EvaluationRequestError(409, 'INVALID_EVALUATION_TRANSITION');
@@ -236,19 +265,31 @@ export class NovelWritingEvaluationSessions {
     const ref = this.ref(ownerId, settings.operationId);
     const fingerprint = evaluationFingerprint(settings);
     const seed = randomUUID();
+    const existing = await ref.get();
+    const prior = existing.exists ? readSession(existing, ownerId) : undefined;
+    if (prior && prior.fingerprint !== fingerprint) throw new EvaluationRequestError(409, 'EVALUATION_OPERATION_CONFLICT');
+    if (prior && prior.status !== 'CREATED') return this.get(ownerId, settings.operationId);
+    const requestedModel = prior?.modelId ?? getEvaluationSettings(true).modelId;
+    if (settings.mode === 'LIVE_GEMINI') {
+      await this.assertPilotAdmission(ownerId, settings);
+      if (!this.provider) {
+        const metadata = await verifyEvaluationPilotModel(requestedModel);
+        if (metadata.status !== 'VERIFIED') throw new EvaluationRequestError(409, metadata.status);
+      }
+    }
     await this.db.runTransaction(async (tx) => {
       const snapshot = await tx.get(ref);
       if (snapshot.exists) {
         if (readSession(snapshot, ownerId).fingerprint !== fingerprint) throw new EvaluationRequestError(409, 'EVALUATION_OPERATION_CONFLICT');
         return;
       }
-      assertEvaluationLiveBudget(settings, true);
+      await this.assertPilotAdmission(ownerId, settings, tx);
       const createdAt = new Date(this.now()).toISOString();
       const plannedCalls = settings.mode === 'LIVE_GEMINI' ? plannedEvaluationCalls(settings.scenarios.length, settings.repeats) : 0;
       const model = getEvaluationSettings(true);
       const current = sessionSchema.parse({
         schemaVersion: 1, ownerId, operationId: settings.operationId, fingerprint, settings, seed, datasetVersion: model.datasetVersion,
-        modelId: model.modelId, modelSettings: evaluationModelSettings, status: 'CREATED', version: 1, claim: null,
+        modelId: requestedModel, modelSettings: evaluationModelSettings, status: 'CREATED', version: 1, claim: null,
         uncertain: false, pendingCall: null, cancelRequested: false, ratings: [], reason: null, createdAt, updatedAt: createdAt, completedAt: null,
         telemetry: { plannedCalls, actualCalls: 0, generationCalls: 0, qualityCalls: 0, measuredTokens: 0, callsWithoutUsage: 0,
           estimatedCostUsd: settings.mode === 'LIVE_GEMINI' ? null : 0, latencyMs: 0 },
@@ -266,7 +307,8 @@ export class NovelWritingEvaluationSessions {
         this.change(tx, ref, current, { status: 'FAILED', reason: 'EVALUATION_CONDITIONS_UNAVAILABLE', completedAt: new Date(this.now()).toISOString() }, 'CONDITIONS_UNAVAILABLE');
         return undefined;
       }
-      assertEvaluationLiveBudget(current.settings, true);
+      if (current.modelId !== requestedModel) throw new EvaluationRequestError(409, 'EVALUATION_MODEL_CHANGED');
+      await this.assertPilotAdmission(ownerId, current.settings, tx);
       return this.change(tx, ref, current, { status: 'RUNNING', claim: { token, expiresAt: this.now() + leaseMs } }, 'CLAIM');
     });
     if (!claimed) return this.get(ownerId, settings.operationId);
@@ -312,10 +354,10 @@ export class NovelWritingEvaluationSessions {
         } });
         tx.create(ref.collection('events').doc(`call_${number}_reserved`), { ownerId, number, kind, outcome: 'RESERVED', at: time() });
       }),
-      afterCall: (number, outcome, usage) => update((tx, current) => {
+      afterCall: (number, outcome, usage, failure) => update((tx, current) => {
         if (current.pendingCall !== number || usage.actualCalls !== number) throw new Error('CALL_RESERVATION_MISMATCH');
         tx.update(ref, { pendingCall: null, uncertain: outcome === 'UNKNOWN', claim: renewed(), updatedAt: time(), telemetry: clean(usage) });
-        tx.create(ref.collection('events').doc(`call_${number}_outcome`), { ownerId, number, outcome, at: time(), telemetry: clean(usage) });
+        tx.create(ref.collection('events').doc(`call_${number}_outcome`), { ownerId, number, outcome, failure: failure ?? null, at: time(), telemetry: clean(usage) });
       }),
       checkpoint: (entry, pair, usage) => update((tx, current) => {
         const data = parseCheckpoint({ entry, pair: pair ?? null });
@@ -331,9 +373,13 @@ export class NovelWritingEvaluationSessions {
       const current = readSession(await tx.get(ref), ownerId);
       if (current.claim?.token !== token) return;
       const uncertain = current.pendingCall !== null || current.uncertain || Boolean(report?.remoteOutcomeUnknown);
+      const unsuccessfulPilot = current.settings.mode === 'LIVE_GEMINI' && report && !report.pairs.length;
+      const responseCode = report?.cases.flatMap((entry) => [entry.baseline, entry.treatment])
+        .map((entry) => entry.writerResponse?.code).find((code) => code && code !== 'SUCCESS');
       const reason = uncertain ? 'REMOTE_CALL_OUTCOME_UNKNOWN' :
-        current.cancelRequested ? 'CANCELLED_BY_AUTHOR' : !report ? 'EXECUTION_FAILED' : report.interrupted ? 'EXECUTION_INTERRUPTED' : null;
-      const status = uncertain ? 'INTERRUPTED' : current.cancelRequested ? 'CANCELLED' : !report ? 'FAILED' :
+        current.cancelRequested ? 'CANCELLED_BY_AUTHOR' : !report ? 'EXECUTION_FAILED' :
+        report.interrupted ? 'EXECUTION_INTERRUPTED' : unsuccessfulPilot ? responseCode ?? 'NO_COMPARABLE_PILOT_RESULT' : null;
+      const status = uncertain ? 'INTERRUPTED' : current.cancelRequested ? 'CANCELLED' : !report || unsuccessfulPilot ? 'FAILED' :
         report.interrupted ? 'INTERRUPTED' : 'AWAITING_HUMAN_REVIEW';
       this.change(tx, ref, current, {
         status, reason, uncertain, claim: null, pendingCall: null, completedAt: new Date(this.now()).toISOString(),
@@ -376,7 +422,15 @@ export class NovelWritingEvaluationSessions {
       resolveEvaluationReviewVersion(current.version, current.status, expectedVersion);
       const records = await this.records(ref, current, tx);
       const ratings = validateEvaluationRatings(records.flatMap(({ pair }) => pair ? [pair] : []), request.ratings);
-      const next = this.change(tx, ref, current, { ratings, ...(request.finalize ? { status: 'FINALIZED' as const } : {}) },
+      const pilotCompleted = request.finalize && current.status === 'AWAITING_HUMAN_REVIEW' && current.settings.mode === 'LIVE_GEMINI' &&
+        current.settings.scenarios.length === 1 && current.settings.scenarios[0] === LIVE_EVALUATION_FIRST_SCENARIO &&
+        current.settings.repeats === 1 && current.settings.treatment === 'STYLE_AND_VOICE' &&
+        current.telemetry.transport === 'GEMINI' && current.telemetry.dispatchedCalls === 4 &&
+        records.some(({ entry }) => entry.comparable && [entry.baseline, entry.treatment].every((arm) =>
+          arm.writerResponse?.code === 'SUCCESS' && arm.qualityResponse?.code === 'SUCCESS'));
+      const next = this.change(tx, ref, current, {
+        ratings, ...(request.finalize ? { status: 'FINALIZED' as const } : {}), ...(pilotCompleted ? { pilotCompleted: true as const } : {}),
+      },
         request.finalize ? 'FINALIZE_REVIEW' : 'SAVE_REVIEW_DRAFT');
       tx.create(receipt, { fingerprint, version: next.version });
       tx.create(ref.collection('events').doc(`review_${next.version}`), {

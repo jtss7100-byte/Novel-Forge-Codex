@@ -14,6 +14,24 @@ export const EVALUATION_SCENARIOS = [
   ['NW10', '1인칭 내적 독백'], ['NW11', '3인칭 제한 시점'], ['NW12', '이전 회차의 복선'],
 ] as const;
 export type EvaluationScenarioId = typeof EVALUATION_SCENARIOS[number][0];
+export const LIVE_EVALUATION_FIRST_SCENARIO = 'NW8';
+export const LIVE_EVALUATION_FOLLOW_UP_SCENARIOS = ['NW6', 'NW10'] as const;
+export const LIVE_EVALUATION_CALLS = 4;
+export const EVALUATION_MODEL_SETTINGS = { temperature: 0.7, topP: 0.9, maxOutputTokens: 2048 };
+export const EVALUATION_RESPONSE_CODES = [
+  'SUCCESS', 'MODEL_NOT_AVAILABLE', 'API_AUTH_FAILED', 'RATE_LIMITED', 'TIMEOUT', 'INVALID_JSON',
+  'SCHEMA_VALIDATION_FAILED', 'INCOMPLETE_GENERATION', 'BLOCKED_BY_CANON', 'OUTPUT_TRUNCATED',
+  'REMOTE_CALL_OUTCOME_UNKNOWN', 'REQUEST_REJECTED', 'MODEL_VERSION_MISMATCH', 'CANCELLED',
+] as const;
+export type EvaluationResponseCode = typeof EVALUATION_RESPONSE_CODES[number];
+export interface EvaluationResponseTrace {
+  code: EvaluationResponseCode;
+  finishReason?: string;
+  json?: 'VALID' | 'INVALID';
+  schema?: 'VALID' | 'INVALID';
+  manuscriptState?: 'DRAFT_READY' | 'BLOCKED_CONFLICT' | 'BLOCKED_MISSING_INFO';
+  usage?: { prompt?: number; output?: number; thinking?: number; total?: number };
+}
 export const EVALUATION_DIMENSIONS = ['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8'] as const;
 export const REVIEW_DIMENSIONS = [
   ['naturalness', '문장 자연스러움'], ['dialogue', '대사 개성'], ['psychology', '심리 묘사'],
@@ -80,6 +98,7 @@ export interface EvaluationCandidate {
   status: string;
   issues: EvaluationIntegrityCode[];
   chars: number;
+  withinTargetLength?: boolean;
   scores: Partial<Record<LiteraryQualityDimensionId, number | null>>;
   qualityStatus: 'NOT_EVALUATED' | 'FIXTURE' | 'AI_AUXILIARY' | 'FAILED';
   style: EvaluationProfileTrace[];
@@ -87,6 +106,8 @@ export interface EvaluationCandidate {
   promptHash?: string;
   observedModelVersion?: string;
   observedQualityModelVersion?: string;
+  writerResponse?: EvaluationResponseTrace;
+  qualityResponse?: EvaluationResponseTrace;
   qualityFailure?: string;
   authorStyleAdherence?: EvaluationAdherence;
   characterVoiceAdherence?: EvaluationAdherence;
@@ -140,4 +161,7 @@ export interface EvaluationTelemetry {
   estimatedCostUsd: number | null;
   latencyMs: number;
   pricingReference?: string;
+  transport?: 'GEMINI' | 'TEST_TRANSPORT' | 'FIXTURE';
+  dispatchedCalls?: number;
+  receivedResponses?: number;
 }

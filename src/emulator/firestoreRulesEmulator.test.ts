@@ -2922,7 +2922,7 @@ test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isola
       assert.ok(saved?.entry.baselineText);
       assert.ok(saved?.pair.assignment);
     });
-    await t.test('EV7: a fresh Admin client lists and restores the persisted experiment after a simulated restart', async () => {
+    await t.test('EV7 / LP15: a fresh Admin client lists and restores the persisted experiment after a simulated restart', async () => {
       assert.deepEqual(await restarted.get(secondVerified.uid, setup.operationId), initial);
       assert.deepEqual((await restarted.list(secondVerified.uid)).entries.map((entry) => entry.operationId), [setup.operationId]);
       assert.deepEqual(await restarted.start(secondVerified.uid, setup), initial);
@@ -3018,10 +3018,18 @@ test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isola
     try {
       const worker = new NovelWritingEvaluationSessions(first.db, () => now, provider);
       const resumed = new NovelWritingEvaluationSessions(fresh.db, () => now, provider);
+      await t.test('pilot admission rejects a follow-up and an expanded budget before creating a durable claim', async () => {
+        const followUp = { ...interruptedSettings, operationId: randomUUID(), scenarios: ['NW6'] as EvaluationSettings['scenarios'] };
+        const expanded = { ...interruptedSettings, operationId: randomUUID(), callBudget: 5 };
+        await assert.rejects(worker.start(owner.uid, followUp), { code: 'PILOT_NW8_REQUIRED' });
+        await assert.rejects(worker.start(owner.uid, expanded), { code: 'PILOT_BUDGET_MUST_BE_FOUR' });
+        assert.equal((await first.db.doc(`users/${owner.uid}/novelWritingEvaluations/${followUp.operationId}`).get()).exists, false);
+        assert.equal(calls, 0);
+      });
       const pending = worker.start(owner.uid, interruptedSettings);
       try {
         await Promise.race([entered, pending.then(() => { throw new Error('mock worker did not reach the reserved call'); })]);
-        await t.test('EV13: stale remote call reservation survives restart and is never dispatched again', async () => {
+        await t.test('EV13 / LP20: stale remote call reservation survives restart and is never dispatched again', async () => {
           assert.equal((await resumed.start(owner.uid, interruptedSettings)).status, 'RUNNING');
           assert.equal(calls, 2);
           assert.equal((await first.db.doc(interruptedPath).get()).data()?.pendingCall, 2);
@@ -3044,6 +3052,8 @@ test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isola
         assert.equal(final.report?.telemetry.callsWithoutUsage, 1);
         assert.equal(final.report?.telemetry.estimatedCostUsd, null);
         assert.equal(final.report?.cases[0].baselineText, sample.scene.baseline);
+        assert.equal(final.report?.cases[0].baseline.writerResponse?.schema, 'VALID');
+        assert.equal(final.report?.telemetry.transport, 'TEST_TRANSPORT');
         assert.equal(final.report?.cases[0].treatmentText, undefined);
         assert.equal(final.report?.summary.comparable, 0);
         assert.equal(final.report?.summary.human.status, 'NOT_RATED');
@@ -3055,7 +3065,7 @@ test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isola
       }
     }
 
-    await t.test('EV16: original manuscript, Revision, CANON and RAG documents are byte-for-byte unchanged', async () => {
+    await t.test('EV16 / LP18: original manuscript, Revision, CANON and RAG documents are byte-for-byte unchanged', async () => {
       for (const [key, data] of keptSources) assert.deepEqual((await first.db.doc(`users/${owner.uid}/${key}`).get()).data(), data);
     });
   } finally {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { FinishReason, GenerateContentResponse, type GenerateContentParameters } from '@google/genai';
 import { z } from 'zod';
 import type { WritingResult } from '../types/aiEngine';
-import { EVALUATION_ARMS, EVALUATION_SCENARIOS, REVIEW_DIMENSIONS, type EvaluationCandidate, type EvaluationCase, type EvaluationRating, type EvaluationSettings, type EvaluationTelemetry } from '../types/novelWritingEvaluation';
+import { EVALUATION_ARMS, EVALUATION_MODEL_SETTINGS, EVALUATION_SCENARIOS, REVIEW_DIMENSIONS, type EvaluationCandidate, type EvaluationCase, type EvaluationRating, type EvaluationSettings, type EvaluationTelemetry, type EvaluationResponseCode } from '../types/novelWritingEvaluation';
 import { KOREAN_WEB_NOVEL_BENCHMARKS } from '../utils/literaryQualityBenchmark';
 import { HARD_CAP_LIVE_EVAL_MAX_CALLS, validateLiveEvalConfig } from '../utils/literaryEvaluationHarness';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
@@ -10,6 +10,8 @@ import { buildEvaluationFixture, EVALUATION_DATASET_VERSION, EVALUATION_OWNER_ID
 import { assertControlledPrompts, buildEvaluationManifest, calculateEvaluationAdherence, checkEvaluationIntegrity, evaluationFingerprint, isCompleteEvaluationResult, makeEvaluationBlindPair, pinCommonQuality, prepareEvaluationArm, qualityTemplateFingerprint, summarizeWritingEvaluation, type HiddenEvaluationPair } from '../utils/novelWritingEvaluationLogic';
 import { buildDynamicWriterSystemInstruction, generateNovelSceneOnServer, getConfiguredWritingModel, getGenAiClient, isGeminiApiKeyReady } from './geminiWritingEngine';
 import { evaluateLiteraryQualityOnServer } from './literaryQualityEngine';
+import { classifyEvaluationApiFailure, evaluationModelVersion, evaluationRejectionStatus, EvaluationRequestError, inspectPilotResponse } from './novelWritingEvaluationPilot';
+export { EvaluationRequestError } from './novelWritingEvaluationPilot';
 
 export const evaluationOperationId = z.uuid();
 const operationId = evaluationOperationId;
@@ -31,11 +33,7 @@ export const evaluationReviewInput = z.strictObject({
 });
 export const evaluationCancelInput = z.strictObject({ operationId });
 
-export class EvaluationRequestError extends Error {
-  constructor(readonly status: number, readonly code: string) { super(code); }
-}
-
-export const evaluationModelSettings = { temperature: 0.7, topP: 0.9, maxOutputTokens: 2048 };
+export const evaluationModelSettings = EVALUATION_MODEL_SETTINGS;
 const callTimeoutMs = 45_000;
 const sessionTtlMs = 60 * 60 * 1000;
 const maxSessions = 48;
@@ -84,11 +82,11 @@ export type EvaluationModelCall = (params: GenerateContentParameters) => Promise
 export type EvaluationCallKind = 'generation' | 'quality';
 export interface EvaluationRunJournal {
   beforeCall: (kind: EvaluationCallKind, callNumber: number) => Promise<void>;
-  afterCall: (callNumber: number, outcome: 'SUCCEEDED' | 'UNKNOWN', telemetry: EvaluationTelemetry) => Promise<void>;
+  afterCall: (callNumber: number, outcome: 'SUCCEEDED' | 'REJECTED' | 'UNKNOWN', telemetry: EvaluationTelemetry, failure?: EvaluationResponseCode) => Promise<void>;
   checkpoint: (entry: EvaluationCase, pair: HiddenEvaluationPair | undefined, telemetry: EvaluationTelemetry) => Promise<void>;
 }
 
-function createCallLedger(settings: EvaluationSettings, modelId: string, signal: AbortSignal, provider?: EvaluationModelCall, journal?: EvaluationRunJournal) {
+function createCallLedger(settings: EvaluationSettings, modelId: string, signal: AbortSignal, provider?: EvaluationModelCall, journal?: EvaluationRunJournal, mocked = false) {
   const start = Date.now();
   const live = settings.mode === 'LIVE_GEMINI';
   const pricing = readPricing(modelId);
@@ -96,10 +94,12 @@ function createCallLedger(settings: EvaluationSettings, modelId: string, signal:
     plannedCalls: live ? plannedEvaluationCalls(settings.scenarios.length, settings.repeats) : 0,
     actualCalls: 0, generationCalls: 0, qualityCalls: 0, measuredTokens: 0, callsWithoutUsage: 0,
     estimatedCostUsd: live && !pricing ? null : 0, latencyMs: 0, pricingReference: live ? pricing?.reference : undefined,
+    transport: !live ? 'FIXTURE' : mocked ? 'TEST_TRANSPORT' : 'GEMINI', dispatchedCalls: 0, receivedResponses: 0,
   };
   let estimateIncomplete = false;
   let estimatedCost = 0;
   let outcomeUnknown = false;
+  let terminalFailure: EvaluationResponseCode | undefined;
   const report = (): EvaluationTelemetry => ({
     ...ledger, estimatedCostUsd: estimateIncomplete || (live && !pricing) ? null : Number(estimatedCost.toFixed(8)),
     latencyMs: Date.now() - start,
@@ -107,6 +107,7 @@ function createCallLedger(settings: EvaluationSettings, modelId: string, signal:
   const generate = async (kind: EvaluationCallKind, params: GenerateContentParameters, mock: () => GenerateContentResponse) => {
     if (signal.aborted || params.config?.abortSignal?.aborted) throw new Error('ABORTED_BY_USER');
     if (!live) return mock();
+    if (terminalFailure) throw new Error(terminalFailure);
     if (outcomeUnknown) throw new Error('REMOTE_CALL_OUTCOME_UNKNOWN');
     if (!provider || ledger.actualCalls >= (settings.callBudget ?? 0) || ledger.actualCalls >= ledger.plannedCalls) throw new Error('CALL_BUDGET_EXCEEDED');
     const callNumber = ledger.actualCalls + 1;
@@ -118,7 +119,8 @@ function createCallLedger(settings: EvaluationSettings, modelId: string, signal:
     const callSignal = AbortSignal.any([signal, timeout.signal, ...(params.config?.abortSignal ? [params.config.abortSignal] : [])]);
     const timer = setTimeout(() => timeout.abort(new Error('MODEL_TIMEOUT')), callTimeoutMs);
     let abortCall: (() => void) | undefined;
-    let outcome: 'SUCCEEDED' | 'UNKNOWN' = 'UNKNOWN';
+    let outcome: 'SUCCEEDED' | 'REJECTED' | 'UNKNOWN' = 'UNKNOWN';
+    let failure: EvaluationResponseCode | undefined;
     try {
       const stopped = new Promise<never>((_, reject) => {
         abortCall = () => reject(new Error(timeout.signal.aborted ? 'MODEL_TIMEOUT' : 'ABORTED_BY_USER'));
@@ -127,11 +129,13 @@ function createCallLedger(settings: EvaluationSettings, modelId: string, signal:
       });
       const response = await Promise.race([stopped, Promise.resolve().then(() => {
         if (callSignal.aborted) throw new Error('ABORTED_BY_USER');
+        ledger.dispatchedCalls = (ledger.dispatchedCalls ?? 0) + 1;
         return provider({ ...params, config: {
           ...params.config, ...evaluationModelSettings, abortSignal: callSignal, httpOptions: { timeout: callTimeoutMs, retryOptions: { attempts: 1 } },
         } });
       })]);
       outcome = 'SUCCEEDED';
+      ledger.receivedResponses = (ledger.receivedResponses ?? 0) + 1;
       const usage = response.usageMetadata;
       if (typeof usage?.totalTokenCount === 'number' && usage.totalTokenCount > 0) ledger.measuredTokens += usage.totalTokenCount;
       else ledger.callsWithoutUsage++;
@@ -143,18 +147,25 @@ function createCallLedger(settings: EvaluationSettings, modelId: string, signal:
     } catch (error) {
       ledger.callsWithoutUsage++;
       estimateIncomplete = true;
+      failure = classifyEvaluationApiFailure(error);
+      if (journal) {
+        terminalFailure = failure;
+        const status = evaluationRejectionStatus(error);
+        if (status && status >= 400 && status < 500 && status !== 408) outcome = 'REJECTED';
+        throw new Error(failure);
+      }
       throw error;
     } finally {
       clearTimeout(timer);
       if (abortCall) callSignal.removeEventListener('abort', abortCall);
       if (journal) {
         outcomeUnknown = true;
-        await journal.afterCall(callNumber, outcome, report());
+        await journal.afterCall(callNumber, outcome, report(), failure);
         outcomeUnknown = outcome === 'UNKNOWN';
       }
     }
   };
-  return { generate, report, hasUnknownOutcome: () => outcomeUnknown };
+  return { generate, report, hasUnknownOutcome: () => outcomeUnknown, terminalFailure: () => terminalFailure };
 }
 
 function mockResponse(value: unknown) {
@@ -181,7 +192,8 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
   const isLive = settings.mode === 'LIVE_GEMINI';
   if (isLive && !options.provider && !journal) throw new EvaluationRequestError(403, 'LIVE_REQUIRES_DURABLE_SESSION');
   const provider = isLive ? options.provider ?? ((params) => getGenAiClient().models.generateContent(params)) : undefined;
-  const ledger = createCallLedger(settings, modelId, signal, provider, journal);
+  const pilot = isLive && Boolean(journal);
+  const ledger = createCallLedger(settings, modelId, signal, provider, journal, Boolean(options.provider));
   const cases: EvaluationCase[] = [];
   const pairs: HiddenEvaluationPair[] = [];
   const seenOutputs = new Set<string>();
@@ -201,7 +213,7 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
         qualityStatus: 'NOT_EVALUATED', style: [], voice: [],
       };
       let result: WritingResult | undefined;
-      if (signal.aborted || ledger.hasUnknownOutcome()) {
+      if (signal.aborted || ledger.hasUnknownOutcome() || ledger.terminalFailure()) {
         if (ledger.hasUnknownOutcome()) candidate.status = 'REMOTE_CALL_OUTCOME_UNKNOWN';
         return { candidate, result };
       }
@@ -216,14 +228,27 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
               candidate.promptHash = computeManuscriptContentHash(arm.prompt);
               candidate.style = arm.style;
               candidate.voice = arm.voice;
-              const response = await ledger.generate('generation', request, () => mockResponse({ manuscript_state: 'DRAFT_READY', manuscript: mockText, issues: [], proposals: [] }));
-              candidate.observedModelVersion = response.modelVersion;
+              let response;
+              try {
+                response = await ledger.generate('generation', request, () => mockResponse({ manuscript_state: 'DRAFT_READY', manuscript: mockText, issues: [], proposals: [] }));
+              } catch (error) {
+                if (pilot) candidate.writerResponse = { code: ledger.terminalFailure() ?? classifyEvaluationApiFailure(error) };
+                throw error;
+              }
+              candidate.observedModelVersion = evaluationModelVersion(response.modelVersion);
+              if (pilot) {
+                candidate.writerResponse = inspectPilotResponse(response, 'generation');
+                if (candidate.writerResponse.code !== 'SUCCESS' && !candidate.writerResponse.manuscriptState) throw new Error(candidate.writerResponse.code);
+              }
               return response;
             },
           },
         });
         candidate.status = isCompleteEvaluationResult(result) ? 'COMPLETED' : (result.status === 'COMPLETED' ? 'INCOMPLETE' : result.executionState.startsWith('BLOCKED') ? result.executionState : result.status);
+        if (pilot && result.executionState === 'BLOCKED_CONFLICT') candidate.status = 'BLOCKED_BY_CANON';
+        if (candidate.writerResponse?.code !== undefined && candidate.writerResponse.code !== 'SUCCESS') candidate.status = candidate.writerResponse.code;
         candidate.chars = result.manuscript.length;
+        candidate.withinTargetLength = result.sceneOutputs?.[0]?.withinTolerance;
         candidate.issues = checkEvaluationIntegrity(fixture, result);
         if (result.status === 'COMPLETED' && (/STYLE_DNA_META|VOICE_DNA_SOURCES|hiddenSideAssignment|baselineSide|promptVersionAssignment|\b(?:BASELINE|TREATMENT|STYLE_ONLY|VOICE_ONLY|STYLE_AND_VOICE)\b|\[문체 프로필 적용\]|\[비교 조건\]|\[숨겨진 배정\]/i.test(result.manuscript) ||
             [fixture.style, ...fixture.voice].some((profile) => result?.manuscript.includes(profile.currentVersionId)))) {
@@ -235,12 +260,12 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
         if (candidate.promptHash && [...arm.style, ...arm.voice].some((profile) => !result?.appliedPromptVersionIds.includes(profile.versionId))) {
           candidate.status = 'PROFILE_TRACE_MISMATCH';
         }
-      } catch (error) { candidate.status = safeFailure(error, signal); }
+      } catch (error) { candidate.status = candidate.writerResponse?.code === 'SUCCESS' ? safeFailure(error, signal) : candidate.writerResponse?.code ?? safeFailure(error, signal); }
       return { candidate, result };
     }
 
     async function evaluateCandidate(candidate: EvaluationCandidate, result: WritingResult) {
-      if (signal.aborted) return;
+      if (signal.aborted || ledger.terminalFailure()) return;
       let contextMismatch = false;
       // Both manuscripts use the same evaluator context and prompt template. The generation arm is absent.
       const evaluation = await evaluateLiteraryQualityOnServer({
@@ -264,18 +289,26 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
                 dimensions: dimensions.map((item) => ({ ...item, explanation: 'DRY_RUN_FIXTURE' })),
                 findings: [],
               });
+            }).catch((error: unknown) => {
+              if (pilot) candidate.qualityResponse = { code: ledger.terminalFailure() ?? classifyEvaluationApiFailure(error) };
+              throw error;
             });
+            if (pilot) {
+              candidate.qualityResponse = inspectPilotResponse(response, 'quality');
+              if (candidate.qualityResponse.code !== 'SUCCESS') throw new Error(candidate.qualityResponse.code);
+            }
             if (response.candidates?.some((candidate) => candidate.finishReason && candidate.finishReason !== FinishReason.STOP)) {
               throw new Error('INCOMPLETE_QUALITY_OUTPUT');
             }
-            candidate.observedQualityModelVersion = response.modelVersion;
+            candidate.observedQualityModelVersion = evaluationModelVersion(response.modelVersion);
             return response;
           },
         },
       });
       candidate.qualityStatus = evaluation.executionStatus === 'COMPLETED' ? isLive ? 'AI_AUXILIARY' : 'FIXTURE' : 'FAILED';
       if (candidate.qualityStatus === 'FAILED') {
-        candidate.qualityFailure = contextMismatch ? 'EVALUATOR_CONTEXT_MISMATCH' : safeFailure(evaluation.errorMessage ? new Error(evaluation.errorMessage) : undefined, signal);
+        candidate.qualityFailure = contextMismatch ? 'EVALUATOR_CONTEXT_MISMATCH' :
+          candidate.qualityResponse?.code !== 'SUCCESS' && candidate.qualityResponse?.code || safeFailure(evaluation.errorMessage ? new Error(evaluation.errorMessage) : undefined, signal);
       }
       if (evaluation.executionStatus === 'COMPLETED') {
         candidate.scores = Object.fromEntries(evaluation.report.dimensions.map((item) => [item.category, item.score]));
@@ -326,7 +359,7 @@ export async function runWritingEvaluation(settings: EvaluationSettings, options
       cases.push(entry);
       if (pair) pairs.push(pair);
       if (journal) await journal.checkpoint(entry, pair, ledger.report());
-      if (journal && (signal.aborted || ledger.hasUnknownOutcome())) return result();
+      if (journal && (signal.aborted || ledger.hasUnknownOutcome() || ledger.terminalFailure())) return result();
     }
   }
   return result();

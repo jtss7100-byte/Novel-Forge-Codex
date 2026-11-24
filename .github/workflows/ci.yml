@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 10
     env:
       RUN_LIVE_CLOUD_TESTS: 'false'
+      RUN_LIVE_GEMINI_EVAL: 'false'
       NOVELFORGE_ENFORCE_CLOUD_AUTH: 'false'
 
     steps:
@@ -49,6 +50,7 @@ jobs:
     timeout-minutes: 15
     env:
       RUN_LIVE_CLOUD_TESTS: 'false'
+      RUN_LIVE_GEMINI_EVAL: 'false'
       NOVELFORGE_ENFORCE_CLOUD_AUTH: 'false'
       GCLOUD_PROJECT: 'demo-novelforge-rag-integrity'
       FIREBASE_PROJECT_ID: 'demo-novelforge-rag-integrity'
