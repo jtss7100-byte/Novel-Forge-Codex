@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createSceneMemoryRetriever } from '../server/sceneMemoryRetrieval';
+import { buildEvaluationFixture } from '../utils/novelWritingEvaluationBenchmark';
+import type { Episode } from '../types/novel';
 import {
   clearEmbeddingCacheForTesting,
   clearLocalRagDiskCacheForTesting,
@@ -21,6 +24,7 @@ import {
 } from '../server/authMiddleware.ts';
 import {
   computeDeterministicSemanticEmbedding,
+  extractProjectMemoryIndexInputs,
   LARGE_SCALE_RAG_TX_OP_THRESHOLD,
 } from '../services/memorySearchProvider.ts';
 import type { RagGenerationStagingReceipt } from '../types/foundation.ts';
@@ -1206,6 +1210,91 @@ test('Emulator E7, E8, E10 & Section 8: Boundaries, Replay Protection via retire
     await handle.db
       .recursiveDelete(handle.db.doc(`users/${ownerId}`))
       .catch(() => undefined);
+    await handle.cleanup();
+  }
+});
+
+test('LM14 and cloud provenance: Writer keyword fallback uses only current scoped revisions in the real Emulator', async () => {
+  const env = assertEmulatorConfigured();
+  const tag = makeEmulatorRunTag();
+  const handle = createIsolatedTestFirestoreClient({ runId: `emu_memory_${tag}`, projectId: env.projectId, databaseId: env.databaseId });
+  const ownerId = `author_${tag}`;
+  const projectId = `memory_${tag}`;
+  const base = `users/${ownerId}/projects/${projectId}`;
+  const contextFixture = buildEvaluationFixture('NW8', 'test-writer');
+  const pov = 'reader';
+  const clock = '2026-01-01T00:00:00.000Z';
+  const episode: Episode = {
+    id: 'past', ownerId, projectId, episodeNumber: 10, title: '북쪽 관문',
+    content: '북쪽 관문에서 은방울을 울려 서약했다.', synopsis: '', authorNote: '',
+    status: 'confirmed', canonStatus: 'CANON', charCountWithSpaces: 0, charCountWithoutSpaces: 0,
+    linkedCharacterIds: [pov], linkedWorldbuildingIds: [], linkedEventIds: ['old_oath'], createdAt: clock, updatedAt: clock, latestRevisionId: 'rev1',
+  };
+  const second = { ...episode, id: 'second_past', episodeNumber: 15, title: '남쪽 선착장', content: '남쪽 선착장에서 검은 돛이 나타났다.',
+    linkedEventIds: ['black_sail'], latestRevisionId: 'rev2' };
+  const firstScene = { ...contextFixture.plan.scenes[0], sceneNumber: 1, title: '북쪽 관문', purpose: '북쪽 관문 은방울 서약',
+    characterIds: [pov], pointOfViewCharacterId: pov, mustIncludeEvent: '은방울',
+    memory: { requiredEventIds: ['old_oath'], povKnownSources: ['EPISODE:past'] } };
+  const secondScene = { ...firstScene, sceneNumber: 2, title: '남쪽 선착장', purpose: '새 갈등을 시작한다',
+    mustIncludeEvent: '단서의 의미를 추적한다', memory: { requiredEventIds: ['black_sail'], povKnownSources: ['EPISODE:second_past'] } };
+  const plan = { ...contextFixture.plan, id: 'approved-plan', ownerId, projectId, episodeId: 'present', scenes: [firstScene, secondScene] };
+  const context = { ...contextFixture.context, ownerId, projectId, episodeId: 'present', sceneCharacterIds: [pov] };
+  const currentDoc = handle.db.doc(`${base}/episodes/present`);
+  const firstDoc = handle.db.doc(`${base}/episodes/past`);
+
+  try {
+    resetTestRuntime();
+    installDeterministicEmbedder();
+    registerProjectOwnerForAdminCheck(projectId, ownerId);
+    const batch = handle.db.batch();
+    batch.set(handle.db.doc(base), { id: projectId, ownerId, lifecycleStatus: 'ACTIVE' });
+    batch.set(currentDoc, { id: 'present', ownerId, projectId, episodeNumber: 40, content: '보존할 현재 원고', canonStatus: 'DRAFT' });
+    batch.set(handle.db.doc(`${base}/writingPlans/${plan.id}`), plan);
+    batch.set(handle.db.doc(`${base}/characters/${pov}`), { id: pov, ownerId, projectId, canonStatus: 'CANON', name: '서린' });
+    for (const row of [episode, second]) {
+      batch.set(handle.db.doc(`${base}/episodes/${row.id}`), row);
+      batch.set(handle.db.doc(`${base}/revisions/${row.latestRevisionId}`), {
+        id: row.latestRevisionId, ownerId, projectId, content: row.content, episodeId: row.id,
+      });
+    }
+    await batch.commit();
+
+    for (const input of extractProjectMemoryIndexInputs({ ownerId, projectId, characters: [], worldbuilding: [], episodes: [episode, second] })) {
+      await indexMemoryInputOnServer(input, { db: handle.db, cacheNamespace: tag,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+    }
+    // The embedder is stubbed locally to fail; these requests never reach Gemini.
+    let embeddingAttempts = 0;
+    setCustomGeminiEmbedContentForTesting(async () => { embeddingAttempts++; throw new Error('test embedding outage'); });
+    const retrieve = createSceneMemoryRetriever({ ownerId, context, plan, db: handle.db });
+    const a = await retrieve({ ...firstScene, memory: { povKnownSources: ['EPISODE:second_past'] } });
+    assert.equal(a.diagnostics.status, 'SELECTED', JSON.stringify(a.diagnostics));
+    assert.deepEqual(a.evidence.map((row) => row.sourceEntityId), ['past']);
+    assert.equal(a.evidence[0].sourceRevisionId, 'rev1');
+    assert.equal(a.evidence[0].originalText, episode.content);
+    assert.deepEqual(a.diagnostics.searchModes, ['KEYWORD_ONLY']);
+    assert.equal(a.diagnostics.vectorFallback, true);
+    assert.equal(a.diagnostics.embeddingRequests, 1);
+    assert.equal(embeddingAttempts, 1);
+
+    const b = await retrieve(secondScene);
+    assert.equal(b.diagnostics.status, 'SELECTED', JSON.stringify(b.diagnostics));
+    assert.deepEqual(b.evidence.map((row) => row.sourceEntityId), ['second_past']);
+    assert.equal(b.diagnostics.embeddingRequests, 1);
+
+    const baseline = (await currentDoc.get()).data();
+    const intruder = await createSceneMemoryRetriever({ ownerId: 'other_author', context, plan, db: handle.db })(firstScene);
+    assert.equal(intruder.diagnostics.status, 'AUTHORITY_UNAVAILABLE');
+    assert.deepEqual(intruder.evidence, []);
+    await firstDoc.update({ latestRevisionId: 'rev3', content: '새 원고' });
+    await handle.db.doc(`${base}/revisions/rev3`).set({ id: 'rev3', ownerId, projectId, content: '새 원고', episodeId: 'past' });
+    const stale = await retrieve(firstScene);
+    assert.ok(stale.diagnostics.rejected.some(({ reason }) => reason === 'STALE_SOURCE'), JSON.stringify(stale.diagnostics));
+    assert.deepEqual(stale.evidence, []);
+    assert.deepEqual((await currentDoc.get()).data(), baseline);
+    assert.equal((await handle.db.doc(`${base}/writingPlans/${plan.id}`).get()).data()?.status, 'APPROVED');
+  } finally {
+    setCustomGeminiEmbedContentForTesting(null);
     await handle.cleanup();
   }
 });

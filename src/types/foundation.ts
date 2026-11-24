@@ -76,6 +76,7 @@ export interface Scene {
   foreshadowingIds: string[];
   canonStatus: CanonStatus;
   sourceRevisionId: string;
+  memoryKnowledge?: SceneMemoryKnowledge;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,6 +101,7 @@ export interface Foreshadowing {
   relatedEventIds: string[];
   relatedCharacterIds: string[];
   sourceRevisionId: string;
+  memoryKnowledge?: SceneMemoryKnowledge;
   createdBy: ActorType;
   createdAt: string;
   updatedAt: string;
@@ -122,6 +124,7 @@ export interface CharacterRelationship {
   effectiveEpisodeId: string;
   effectiveEventId: string;
   sourceRevisionId: string;
+  memoryKnowledge?: SceneMemoryKnowledge;
   createdBy: ActorType;
   createdAt: string;
   updatedAt: string;
@@ -145,6 +148,7 @@ export interface TimelineEvent {
   linkedWorldbuildingIds: string[];
   canonStatus: CanonStatus;
   sourceRevisionId: string;
+  memoryKnowledge?: SceneMemoryKnowledge;
   createdBy: ActorType;
   createdAt: string;
   updatedAt: string;
@@ -409,3 +413,4 @@ export interface AdvancedFoundationCollections {
   styleProfiles?: StyleProfile[];
   changeProposals?: ChangeProposal[];
 }
+import type { SceneMemoryKnowledge } from './sceneMemory';

@@ -1152,11 +1152,13 @@ export function verifyChunkAgainstLiveSource(params: {
   chunk: MemoryChunk;
   document: MemoryDocument;
   liveSources?: LiveSourceSnapshotMap;
+  requireVerifiedLiveSource?: boolean;
 }): {
   freshnessStatus: MemorySourceFreshness;
   verifiedForWriting: boolean;
 } {
   const { chunk, document, liveSources } = params;
+  const liveSource = liveSources?.[`${chunk.sourceEntityType}:${chunk.sourceEntityId}`] ?? liveSources?.[chunk.sourceEntityId];
 
   if (
     !chunk.documentId ||
@@ -1178,6 +1180,13 @@ export function verifyChunkAgainstLiveSource(params: {
       freshnessStatus: 'STALE',
       verifiedForWriting: false,
     };
+  }
+
+  if (params.requireVerifiedLiveSource && (!liveSource?.exists || !(liveSource.latestRevisionId || liveSource.currentRevisionId) ||
+      liveSource.canonStatus !== 'CANON' || !liveSource.fullText || typeof chunk.sourceStartOffset !== 'number' ||
+      typeof chunk.sourceEndOffset !== 'number' || chunk.sourceStartOffset < 0 || chunk.sourceEndOffset > liveSource.fullText.length ||
+      chunk.sourceStartOffset >= chunk.sourceEndOffset)) {
+    return { freshnessStatus: 'SOURCE_UNVERIFIED', verifiedForWriting: false };
   }
 
   if (liveSources) {

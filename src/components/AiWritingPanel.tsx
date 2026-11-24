@@ -89,6 +89,7 @@ import {
 } from '../utils/literaryRewritingLogic';
 import { generateEntityId } from '../utils/novelLogic';
 import { LiteraryQualityPanel } from './LiteraryQualityPanel';
+import { SceneMemoryReview } from './SceneMemoryReview';
 import { NovelWritingEvaluationPanel } from './NovelWritingEvaluationPanel';
 import type { VoiceRewriteSelection } from './CharacterVoicePanel';
 
@@ -613,8 +614,8 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
       approvedAt: nowIso,
       updatedAt: nowIso,
     };
-    setCurrentPlan(approved);
     await onSaveWritingPlan(approved);
+    setCurrentPlan(approved);
     setWorkflowState('IDLE');
     setStatusNotice(
       '기획안이 작가에 의해 최종 승인되었습니다! 이제 [장면별 원고 생성] 또는 [회차 전체 집필]을 실행할 수 있습니다.'
@@ -623,7 +624,8 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
 
   const handleUpdateSceneInPlan = (
     sceneNumber: number,
-    updates: Partial<ScenePlanItem>
+    updates: Partial<ScenePlanItem>,
+    requireApproval = false
   ) => {
     if (!currentPlan) return;
     const updatedScenes = currentPlan.scenes.map((sc) =>
@@ -632,6 +634,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
     setCurrentPlan({
       ...currentPlan,
       scenes: updatedScenes,
+      status: requireApproval ? 'DRAFT_PLAN' : currentPlan.status,
       updatedAt: new Date().toISOString(),
     });
   };
@@ -2556,6 +2559,55 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
                     className="w-full rounded border border-slate-800 bg-slate-950 p-2 text-[11px] text-slate-300"
                   />
 
+                  <details className="space-y-2 text-slate-300">
+                    <summary className="cursor-pointer">장면 기억 조건</summary>
+                    <label className="block space-y-1">
+                      <span>시점 인물</span>
+                      <select value={sc.pointOfViewCharacterId ?? ''}
+                        className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
+                        onChange={(e) => {
+                          const { pointOfViewCharacterId: _previous, ...scene } = sc;
+                          const id = e.target.value;
+                          setCurrentPlan({ ...currentPlan, status: 'DRAFT_PLAN', scenes: currentPlan.scenes.map((item) =>
+                            item.sceneNumber === scene.sceneNumber ? { ...scene, ...(id ? { pointOfViewCharacterId: id } : {}) } : item) });
+                        }}>
+                        <option value="">장면에서 지정하지 않음</option>
+                        {characters.filter((character) => sc.characterIds.includes(character.id)).map((character) =>
+                          <option key={character.id} value={character.id}>{character.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="block space-y-1">
+                      <span>장면 시점 기준 사건 ID</span>
+                      <input defaultValue={sc.memory?.cutoffEventId ?? ''} maxLength={128}
+                        className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
+                        onBlur={(e) => {
+                          const id = e.target.value.trim();
+                          if (id === (sc.memory?.cutoffEventId ?? '')) return;
+                          const { cutoffEventId: _previous, ...memory } = sc.memory ?? {};
+                          handleUpdateSceneInPlan(sc.sceneNumber, { memory: { ...memory, ...(id ? { cutoffEventId: id } : {}) } }, true);
+                        }} />
+                    </label>
+                    {([
+                      ['requiredEventIds', '꼭 회수할 사건 ID'],
+                      ['foreshadowingIds', '관련 복선 ID'],
+                      ['worldbuildingIds', '관련 세계관 ID'],
+                      ['locations', '관련 장소'],
+                      ['povKnownSources', '시점 인물이 아는 출처 (예\u0020EPISODE:출처ID)'],
+                    ] as const).map(([field, label]) => (
+                      <label key={field} className="block space-y-1">
+                        <span>{label} · 쉼표로 구분</span>
+                        <input defaultValue={sc.memory?.[field]?.join(', ') ?? ''} maxLength={1600}
+                          className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
+                          onBlur={(e) => {
+                            const values = [...new Set(e.target.value.split(',').map((value) => value.trim()).filter(Boolean))].slice(0, 12);
+                            if (JSON.stringify(values) === JSON.stringify(sc.memory?.[field] ?? [])) return;
+                            handleUpdateSceneInPlan(sc.sceneNumber, { memory: { ...sc.memory, [field]: values } }, true);
+                          }} />
+                      </label>
+                    ))}
+                    <p className="text-slate-400">변경한 기억 조건은 기획안 승인 후 다음 집필에 적용됩니다.</p>
+                  </details>
+
                   <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400">
                     <span>등장: {sc.characterNames.join(', ') || '주요 인물'}</span>
                     <span>감정선: {sc.emotionalArc}</span>
@@ -3565,22 +3617,15 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
               <span>이번 집필에서 참조한 기억 (RAG 검증 근거 · 확정 설정/원고 발췌)</span>
               <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-bold text-indigo-300">
                 {(
-                  lastWritingResult?.referencedMemoryChunks ||
-                  writingContext.retrievedMemoryChunks ||
-                  []
+                  lastWritingResult?.referencedMemoryChunks ?? []
                 ).length}
                 건
               </span>
             </div>
-            <span className="text-[11px] text-slate-400">
-              FRESH 검증 통과 청크만 Novel Writer 2단계 문맥에 주입됨
-            </span>
           </div>
 
           {(
-            lastWritingResult?.referencedMemoryChunks ||
-            writingContext.retrievedMemoryChunks ||
-            []
+            lastWritingResult?.referencedMemoryChunks ?? []
           ).length === 0 ? (
             <div className="rounded-lg border border-slate-800/80 bg-slate-900/60 p-2.5 text-[11px] text-slate-400">
               아직 본문 생성이 실행되지 않았거나 추가 참조된 장기 기억 청크가 없습니다. (본문 집필 실행 시 서버 RAG 엔진이 관련 확정 원고·설정을 자동 검색하여 2단계 프롬프트에 주입하고 이곳에 출처와 오프셋을 기록합니다.)
@@ -3588,9 +3633,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
           ) : (
             <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
               {(
-                lastWritingResult?.referencedMemoryChunks ||
-                writingContext.retrievedMemoryChunks ||
-                []
+                lastWritingResult?.referencedMemoryChunks ?? []
               ).map((mem, idx) => (
                 <div
                   key={mem.chunkId || idx}
@@ -3605,7 +3648,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
                         {mem.freshnessStatus}
                       </span>
                       <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-mono text-indigo-300">
-                        {(mem.relevanceScore * 100).toFixed(0)}%
+                        {mem.relevanceScore.toFixed(2)}
                       </span>
                     </div>
                   </div>
@@ -3623,6 +3666,7 @@ export const AiWritingPanel: React.FC<AiWritingPanelProps> = ({
               ))}
             </div>
           )}
+          <SceneMemoryReview records={lastWritingResult?.sceneMemoryDiagnostics ?? []} />
         </div>
 
         {/* Token Usage & Provenance Bar */}

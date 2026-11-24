@@ -1185,6 +1185,15 @@ export const MemorySearchView: React.FC<MemorySearchViewProps> = ({
                       {typeof hit.semanticScore === 'number' && (
                         <span>벡터 유사도: {(hit.semanticScore * 100).toFixed(0)}%</span>
                       )}
+                      {hit.retrievalSource && (
+                        <span>
+                          {hit.retrievalSource === 'KEYWORD_ONLY' ? '키워드' :
+                            hit.retrievalSource === 'FIRESTORE_VECTOR_ONLY' ? 'Firestore 벡터' :
+                            hit.retrievalSource === 'LOCAL_HYBRID' ? '로컬 혼합' : 'Firestore 벡터·키워드 혼합'}
+                        </span>
+                      )}
+                      {hit.vectorRank !== undefined && <span>벡터 순위 {hit.vectorRank}</span>}
+                      {hit.keywordRank !== undefined && <span>키워드 순위 {hit.keywordRank}</span>}
                       {hit.matchedTerms.length > 0 && (
                         <span className="text-indigo-300">
                           매칭 키워드: {hit.matchedTerms.slice(0, 6).join(', ')}

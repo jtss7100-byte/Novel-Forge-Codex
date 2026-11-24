@@ -3073,3 +3073,39 @@ test('Emulator Test 12: Novel Writing Evaluation Persistence, Blind Review Isola
     await Promise.all([owner.cleanup(), intruder.cleanup(), deleteClientApp(secondApp), first.cleanup(), fresh.cleanup()]);
   }
 });
+
+test('Scene memory plan annotations persist under existing owner-only Firestore rules', async () => {
+  const env = assertRulesEmulatorEnv();
+  const run = Date.now().toString();
+  const makeUser = (roleLabel: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel, email: `memory-${roleLabel}-${run}@novelforge.local`,
+    password: 'EmulatorMemory#123', appName: `client_memory_${roleLabel}_${run}`, adminAppName: `admin_memory_${roleLabel}_${run}`,
+  });
+  const owner = await makeUser('owner');
+  const other = await makeUser('other');
+  const admin = createIsolatedTestFirestoreClient({ ...env, runId: `memory_plan_${run}` });
+  const path = `users/${owner.uid}/projects/memory_plan`;
+  const planRef = `${path}/writingPlans/plan_memory`;
+  const memory = { cutoffEventId: 'cutoff', requiredEventIds: ['oath'], povKnownSources: ['TIMELINE_EVENT:oath'] };
+  const { plan } = buildEvaluationFixture('NW8', 'offline-writer');
+  try {
+    await admin.db.doc(path).set({ id: 'memory_plan', ownerId: owner.uid });
+    const ownerRef = doc(owner.db, planRef);
+    await setDoc(ownerRef, {
+      id: 'plan_memory', ownerId: owner.uid, projectId: 'memory_plan', episodeId: 'episode_memory',
+      episodeTitle: plan.episodeTitle, episodeGoal: plan.episodeGoal, requiredEvents: [], forbiddenDevelopments: [],
+      targetTotalCharCount: 550, narrativePerspective: 'THIRD_LIMITED', scenes: [{ ...plan.scenes[0], memory }],
+      plotDeviationWarnings: [], appliedPromptVersionIds: [], referencedSourceIds: [],
+      modelId: 'offline-writer', status: 'APPROVED', approvedAt: new Date().toISOString(),
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    });
+    assert.deepEqual((await getDoc(ownerRef)).data()?.scenes[0].memory, memory);
+    assert.deepEqual((await admin.db.doc(planRef).get()).data()?.scenes[0].memory, memory);
+    await assertPermissionDenied(() => getDoc(doc(other.db, planRef)), 'Another user cannot restore scene memory annotations');
+    await assertPermissionDenied(() => updateDoc(doc(other.db, planRef), { scenes: plan.scenes, updatedAt: serverTimestamp() }),
+      'Another user cannot alter scene memory annotations');
+  } finally {
+    await admin.db.recursiveDelete(admin.db.doc(path));
+    await Promise.all([owner.cleanup(), other.cleanup(), admin.cleanup()]);
+  }
+});

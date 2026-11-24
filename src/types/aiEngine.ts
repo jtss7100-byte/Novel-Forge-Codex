@@ -250,6 +250,7 @@ export interface ScenePlanItem {
   mustIncludeEvent: string;
   narrativePerspective?: NarrativePerspective;
   pointOfViewCharacterId?: string;
+  memory?: SceneMemoryPlan;
 }
 
 export interface WritingPlan {
@@ -349,6 +350,9 @@ export interface RagRetrievedEvidenceItem {
   canonStatus: CanonStatus;
   freshnessStatus: 'FRESH' | 'STALE' | 'SOURCE_UNVERIFIED';
   verifiedForWriting: boolean;
+  temporalStatus?: MemoryTemporalStatus;
+  temporalBasis?: 'NARRATIVE_CUTOFF' | 'EPISODE_ORDER';
+  knowledgeEligibility?: import('./sceneMemory').MemoryKnowledgeEligibility;
 }
 
 export interface TokenUsageMetadata {
@@ -414,6 +418,7 @@ export interface WritingResult {
   referencedSources: ReferencedSource[];
   /** Phase 3: Verified RAG memory chunks that were actually injected into Novel Writer prompt */
   referencedMemoryChunks?: RagRetrievedEvidenceItem[];
+  sceneMemoryDiagnostics?: SceneMemoryDiagnostics[];
   appliedPromptVersionIds: string[];
   appliedMasterRulesVersion?: AppliedMasterRulesVersionInfo;
   modelId: string;
@@ -497,3 +502,4 @@ export interface WritingContextBundle {
   retrievedMemoryChunks?: RagRetrievedEvidenceItem[];
   missingEvidenceNotes: string[];
 }
+import type { MemoryTemporalStatus, SceneMemoryDiagnostics, SceneMemoryPlan } from './sceneMemory';

@@ -8,7 +8,9 @@ import type {
   NovelForgeAppResult,
   NovelForgeWriterIssue,
   NovelForgeWriterProposal,
+  RagRetrievedEvidenceItem,
   SceneDraftOutput,
+  ScenePlanItem,
   TokenUsageMetadata,
   WriterManuscriptState,
   WritingContextBundle,
@@ -46,10 +48,9 @@ import {
   validateRewriteSelectionTarget,
 } from '../utils/manuscriptIntegrity';
 import { isScopedVoicePrompt, restrictWritingVoiceScope } from '../utils/voicePromptScope';
-import {
-  indexMemoryInputOnServer,
-  retrieveVerifiedMemoryForWritingOnServer,
-} from './ragEngine.ts';
+import { indexMemoryInputOnServer } from './ragEngine.ts';
+import { createSceneMemoryRetriever } from './sceneMemoryRetrieval';
+import type { SceneMemoryDiagnostics } from '../types/sceneMemory';
 
 // Active locks per projectId:episodeId to block duplicate concurrent requests
 const activeEpisodeLocks = new Map<string, string>();
@@ -580,6 +581,30 @@ function createWriterModelCall(signal: AbortSignal) {
   return (request: GenerateContentParameters) => callWithRetry(() => ai.models.generateContent(request), signal);
 }
 
+function attachWriterMemory(context: WritingContextBundle, retrievedMemoryChunks: RagRetrievedEvidenceItem[]): WritingContextBundle {
+  const enrichedReferencedSources = [...(context.referencedSources || [])];
+  const existingRefIds = new Set(enrichedReferencedSources.map((r) => r.entityId));
+  for (const chunk of retrievedMemoryChunks) {
+    if (chunk.verifiedForWriting && !existingRefIds.has(chunk.sourceEntityId)) {
+      existingRefIds.add(chunk.sourceEntityId);
+      enrichedReferencedSources.push({
+        entityType:
+          chunk.sourceEntityType === 'CHARACTER' ||
+          chunk.sourceEntityType === 'CHARACTER_STATE_CHANGE'
+            ? 'CHARACTER'
+            : chunk.sourceEntityType === 'WORLDBUILDING'
+            ? 'WORLDBUILDING'
+            : 'EPISODE',
+        entityId: chunk.sourceEntityId,
+        title: chunk.title,
+        canonStatus: chunk.canonStatus === 'CANON' ? 'CANON' : 'PROPOSED',
+        revisionId: chunk.sourceRevisionId,
+      });
+    }
+  }
+  return { ...context, referencedSources: enrichedReferencedSources, retrievedMemoryChunks };
+}
+
 export async function generateNovelSceneOnServer(params: {
   runId?: string;
   ownerId?: string;
@@ -639,50 +664,24 @@ export async function generateNovelSceneOnServer(params: {
 
   const appliedMasterRulesVersion = extractAppliedMasterRulesVersion(context, nowIso);
 
+  const enrichedContext = attachWriterMemory(context, evaluation ? context.retrievedMemoryChunks ?? [] : []);
+  const retrieveMemory = evaluation ? undefined : createSceneMemoryRetriever({ ownerId, context: enrichedContext, plan });
+  const diagnostics: SceneMemoryDiagnostics[] = [];
+  const usedMemory = new Map<string, RagRetrievedEvidenceItem>();
+  async function getSceneContext(scene?: ScenePlanItem) {
+    if (!retrieveMemory) return enrichedContext;
+    const { evidence, diagnostics: sceneDiagnostics } = await retrieveMemory(scene);
+    diagnostics.push(sceneDiagnostics);
+    if (generationSignal.aborted) return enrichedContext;
+    for (const item of evidence) usedMemory.set(item.chunkId, item);
+    return attachWriterMemory(enrichedContext, evidence);
+  }
+  const resultMemory = () => ({
+    referencedMemoryChunks: evaluation ? enrichedContext.retrievedMemoryChunks : [...usedMemory.values()],
+    ...(retrieveMemory ? { sceneMemoryDiagnostics: diagnostics } : {}),
+  });
+
   try {
-    // Phase 3 Section 7: 12-Step RAG Retrieval & Provenance Verification before Novel Writer
-    let retrievedMemoryChunks = context.retrievedMemoryChunks || [];
-    if (retrievedMemoryChunks.length === 0) {
-      try {
-        const ragRetrieval = await retrieveVerifiedMemoryForWritingOnServer({
-          ownerId,
-          context,
-          topK: 6,
-        });
-        retrievedMemoryChunks = Array.isArray(ragRetrieval)
-          ? ragRetrieval
-          : [];
-      } catch {
-        retrievedMemoryChunks = [];
-      }
-    }
-
-    const enrichedReferencedSources = [...(context.referencedSources || [])];
-    const existingRefIds = new Set(enrichedReferencedSources.map((r) => r.entityId));
-    for (const chunk of retrievedMemoryChunks) {
-      if (chunk.verifiedForWriting && !existingRefIds.has(chunk.sourceEntityId)) {
-        existingRefIds.add(chunk.sourceEntityId);
-        enrichedReferencedSources.push({
-          entityType:
-            chunk.sourceEntityType === 'CHARACTER' ||
-            chunk.sourceEntityType === 'CHARACTER_STATE_CHANGE'
-              ? 'CHARACTER'
-              : chunk.sourceEntityType === 'WORLDBUILDING'
-              ? 'WORLDBUILDING'
-              : 'EPISODE',
-          entityId: chunk.sourceEntityId,
-          title: chunk.title,
-          canonStatus: chunk.canonStatus === 'CANON' ? 'CANON' : 'PROPOSED',
-          revisionId: chunk.sourceRevisionId,
-        });
-      }
-    }
-
-    const enrichedContext: WritingContextBundle = {
-      ...context,
-      referencedSources: enrichedReferencedSources,
-      retrievedMemoryChunks,
-    };
     const dynamicSystemInstruction = buildDynamicWriterSystemInstruction(enrichedContext);
 
     // Pre-Writing Conflict Gate & Anti-Overblocking Check (Requirement 6)
@@ -741,7 +740,8 @@ export async function generateNovelSceneOnServer(params: {
             sceneOutputs: [],
             issues: mappedIssues,
             proposals: mappedProposals,
-            referencedSources: context.referencedSources,
+            referencedSources: attachWriterMemory(enrichedContext, [...usedMemory.values()]).referencedSources,
+          ...resultMemory(),
             appliedPromptVersionIds: context.activePrompts.map((p) => p.versionId),
             appliedMasterRulesVersion,
             modelId,
@@ -777,9 +777,10 @@ export async function generateNovelSceneOnServer(params: {
           '인물의 시선 처리, 신체 상태에 따른 움직임, 주변 환경과의 물리적 상호작용 디테일을 보강하세요.',
       };
 
+      const sceneContext = await getSceneContext();
       const targetChars = enrichedContext.targetEpisodeCharCount;
       const assembledOrder = assembleNovelWriterPromptInOrder({
-        context: enrichedContext,
+        context: sceneContext,
         totalScenesInPlan: plan?.scenes?.length ?? 1,
         episodeGoal: plan?.episodeGoal,
         previousSceneEndingExcerpt: enrichedContext.currentManuscript,
@@ -876,7 +877,8 @@ export async function generateNovelSceneOnServer(params: {
           sceneOutputs: isBlocked ? [] : [sceneOut],
           issues: mappedIssues,
           proposals: mappedProposals,
-          referencedSources: context.referencedSources,
+          referencedSources: attachWriterMemory(enrichedContext, [...usedMemory.values()]).referencedSources,
+          ...resultMemory(),
           appliedPromptVersionIds: context.activePrompts.map((p) => p.versionId),
           appliedMasterRulesVersion,
           modelId,
@@ -901,9 +903,10 @@ export async function generateNovelSceneOnServer(params: {
             selectedTextToRewrite: context.selectedTextToRewrite,
           })
         : null;
+      const sceneContext = await getSceneContext();
       const targetChars = enrichedContext.targetSceneCharCount;
       const assembledOrder = assembleNovelWriterPromptInOrder({
-        context: enrichedContext,
+        context: sceneContext,
         totalScenesInPlan: plan?.scenes?.length ?? 1,
         episodeGoal: plan?.episodeGoal,
         previousSceneEndingExcerpt: enrichedContext.currentManuscript.slice(-3500),
@@ -1024,7 +1027,8 @@ export async function generateNovelSceneOnServer(params: {
           sceneOutputs: isBlocked ? [] : [sceneOut],
           issues: mappedIssues,
           proposals: mappedProposals,
-          referencedSources: context.referencedSources,
+          referencedSources: attachWriterMemory(enrichedContext, [...usedMemory.values()]).referencedSources,
+          ...resultMemory(),
           appliedPromptVersionIds: context.activePrompts.map((p) => p.versionId),
           appliedMasterRulesVersion,
           modelId,
@@ -1072,8 +1076,9 @@ export async function generateNovelSceneOnServer(params: {
         break;
       }
 
-      const sceneContext = restrictWritingVoiceScope(enrichedContext,
+      const sceneContext = restrictWritingVoiceScope(await getSceneContext(scenePlan),
         (enrichedContext.sceneCharacterIds || []).filter((id) => scenePlan.characterIds?.includes(id)));
+      if (generationSignal.aborted) break;
       for (const profile of sceneContext.activePrompts) {
         if (profile.promptType === 'CHARACTER_DIALOGUE_RULES' && isScopedVoicePrompt(profile)) usedScopedVoiceIds.add(profile.profileId);
       }
@@ -1212,10 +1217,10 @@ export async function generateNovelSceneOnServer(params: {
         sceneOutputs,
         issues: mappedIssues,
         proposals: mappedProposals,
-        referencedSources: enrichedContext.referencedSources.filter((source) => source.entityType !== 'PROMPT_PROFILE' ||
+        referencedSources: attachWriterMemory(enrichedContext, [...usedMemory.values()]).referencedSources.filter((source) => source.entityType !== 'PROMPT_PROFILE' ||
           !enrichedContext.activePrompts.some((profile) => profile.profileId === source.entityId &&
             profile.promptType === 'CHARACTER_DIALOGUE_RULES' && isScopedVoicePrompt(profile) && !usedScopedVoiceIds.has(profile.profileId))),
-        referencedMemoryChunks: enrichedContext.retrievedMemoryChunks,
+        ...resultMemory(),
         appliedPromptVersionIds: enrichedContext.activePrompts.filter((profile) =>
           profile.promptType !== 'CHARACTER_DIALOGUE_RULES' || !isScopedVoicePrompt(profile) || usedScopedVoiceIds.has(profile.profileId))
           .map((p) => p.versionId),
@@ -1268,7 +1273,8 @@ export async function generateNovelSceneOnServer(params: {
             )
           ),
           proposals: [],
-          referencedSources: context.referencedSources,
+          referencedSources: attachWriterMemory(enrichedContext, [...usedMemory.values()]).referencedSources,
+          ...resultMemory(),
           appliedPromptVersionIds: context.activePrompts.map((p) => p.versionId),
           modelId,
           usageMetadata: totalUsage,

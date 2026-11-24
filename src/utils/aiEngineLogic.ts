@@ -1375,6 +1375,11 @@ export function assembleNovelWriterPromptInOrder(params: {
                 : '전 구간';
             return [
               `- [장기 기억 근거 #${idx + 1} | 청크ID: ${item.chunkId} | 출처ID: ${item.sourceEntityId} | 분류: ${item.sourceEntityType} (${item.canonStatus}) | 회차: ${epLabel} | 버전: ${item.sourceRevisionId} | 위치: ${offsetLabel} | 관련도: ${item.relevanceScore.toFixed(3)}]`,
+              ...(item.temporalStatus === 'SUPERSEDED_HISTORICAL_STATE' ? ['  시간 상태: 과거 상태입니다. 현재 유효한 상태로 묘사하지 마십시오.'] :
+                item.temporalStatus === 'CURRENT_VALID_STATE' ? ['  시간 상태: 장면 시점에 유효합니다.'] :
+                item.temporalStatus === 'PAST_EVENT' ? [item.temporalBasis === 'EPISODE_ORDER' ? '  시간 상태: 출간 회차 기준으로 앞선 자료입니다.' : '  시간 상태: 설정된 장면 시점보다 앞선 사건입니다.'] : []),
+              ...(item.knowledgeEligibility === 'UNKNOWN_KNOWLEDGE_SCOPE'
+                ? ['  지식 범위: 전지적 서술 참고용입니다. 인물의 대사·생각·행동에 이미 아는 정보로 쓰지 마십시오.'] : []),
               `  제목/구간: ${sanitizeEmbeddedDataAgainstCommandInjection(item.title)}`,
               `  원문 근거 발췌: ${sanitizeEmbeddedDataAgainstCommandInjection(item.originalText)}`,
             ].join('\n');
