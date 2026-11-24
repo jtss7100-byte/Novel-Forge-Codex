@@ -23,7 +23,10 @@ bun run dev
 
 ## 회귀 검증
 
+집필 규칙과 JSON 스키마의 공식 원본 및 공개 사본 갱신 방법은 [스키마 관리 안내](docs/schema-sources.md)를 참고합니다.
+
 ```powershell
+bun run schemas:check
 bun run lint
 bun run test
 bun run build

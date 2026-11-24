@@ -73,6 +73,7 @@ import {
 import {
   createInitialPromptProfiles,
   ensureMasterWritingRulesRegistered,
+  isLegacyMasterWritingRulesPlaceholder,
 } from '../utils/aiEngineLogic';
 import { createInitialSeedBundle } from '../utils/seedData';
 
@@ -170,10 +171,7 @@ export function loadLocalBundles(ownerId = 'local_author'): ProjectBundle[] {
       const baseProfiles =
         Array.isArray(b.writingPromptProfiles) && b.writingPromptProfiles.length > 0
           ? b.writingPromptProfiles.map((p) => {
-              if (
-                p.promptType === 'CORE_WRITING_RULES' &&
-                p.content.includes('[기본 테스트 지침 — 작가가 전용 프롬프트를 등록하면 즉시 교체됩니다]')
-              ) {
+              if (isLegacyMasterWritingRulesPlaceholder(p)) {
                 const defaults = createInitialPromptProfiles(
                   b.project.ownerId || ownerId,
                   b.project.id

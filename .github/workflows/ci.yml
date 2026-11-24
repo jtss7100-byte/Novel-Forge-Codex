@@ -41,6 +41,9 @@ jobs:
         timeout-minutes: 3
         run: bun install --frozen-lockfile
 
+      - name: Verify public schema and writing rules assets
+        run: bun run schemas:check
+
       - name: TypeScript Typecheck (Lint)
         timeout-minutes: 2
         run: bun run lint

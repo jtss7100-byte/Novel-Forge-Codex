@@ -1,7 +1,7 @@
 /**
  * NOVEL FORGE — Master Writing & Engine Control Rules (Version 1.0)
  * Registered in Prompt Manager -> Core Writing Rules (`CORE_WRITING_RULES`).
- * Exact 100% verbatim copy of NOVEL_FORGE_Master_Writing_Rules_v1.0.md.
+ * Canonical runtime source. The legacy Markdown download is generated from this module.
  */
 
 export const MASTER_WRITING_RULES_META = {
@@ -245,3 +245,7 @@ Novel Writer의 내용은 논리적으로 다음 영역을 구분합니다.
 - **검증:** 1인칭/3인칭/다중 시점 장면 생성, 의도적 확정 설정 충돌, 경미한 정보 부족과 필수 정보 누락, 검수 실패 후 초안 보존, 재검수 시 동일 원고 버전 유지, 승인 없는 \`APPROVED\` 차단을 실제 테스트합니다.
 
 **최종 원칙:** AI는 원고를 제안하고 검토를 도울 수 있지만, **작품의 확정 설정과 정식 원고를 승인할 권한은 작가에게만 있습니다.**`;
+
+if (!MASTER_WRITING_RULES_V1_0_CONTENT.trim()) {
+  throw new Error('Missing canonical Master Writing Rules content in src/schemas/masterWritingRulesV1.ts');
+}

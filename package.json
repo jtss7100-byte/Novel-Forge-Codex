@@ -11,6 +11,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "schemas:generate": "node --import tsx scripts/schemaAssets.ts generate",
+    "schemas:check": "node --import tsx scripts/schemaAssets.ts check",
     "test": "tsx --test src/utils/*.test.ts",
     "test:emulator": "tsx --test --test-concurrency=1 src/emulator/*.test.ts"
   },

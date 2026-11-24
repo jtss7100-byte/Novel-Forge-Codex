@@ -1271,13 +1271,15 @@ describe('NOVEL FORGE Phase 2.5 — Master Writing Rules Integration (Scenarios 
     );
     assert.ok(core.content.includes('## 10. 집필 상태 관리 및 안전한 원고 보존'));
 
-    // Legacy migration check: ensureMasterWritingRulesRegistered upgrades old profiles automatically
+    // Only the built-in legacy placeholder qualifies for automatic migration.
+    const placeholder = '[기본 테스트 지침 — 작가가 전용 프롬프트를 등록하면 즉시 교체됩니다]';
     const migrated = ensureMasterWritingRulesRegistered(
       [
         {
           ...core,
-          title: 'Legacy Rules',
-          content: 'short legacy text',
+          title: 'NOVEL FORGE — Advanced Writing Control Rules',
+          content: placeholder,
+          versions: core.versions.map((version) => ({ ...version, content: placeholder })),
         },
       ],
       projectP25.ownerId,

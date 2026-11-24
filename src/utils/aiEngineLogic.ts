@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import writerResponseRawJsonSchema from '../schemas/novelforge_writer_response.schema.json';
 import appResultRawJsonSchema from '../schemas/novelforge_app_result.schema.json';
+import { assertCanonicalJsonSchema } from '../schemas/assertCanonicalJsonSchema';
 import {
   MASTER_WRITING_RULES_META,
   MASTER_WRITING_RULES_V1_0_CONTENT,
@@ -66,6 +67,9 @@ import {
   createChangeProposalDraft,
   normalizeToCanonStatus,
 } from './foundationLogic';
+
+assertCanonicalJsonSchema(writerResponseRawJsonSchema, 'novelforge_writer_response.schema.json');
+assertCanonicalJsonSchema(appResultRawJsonSchema, 'novelforge_app_result.schema.json');
 
 export const NOVELFORGE_WRITER_RESPONSE_JSON_SCHEMA = writerResponseRawJsonSchema;
 export const NOVELFORGE_APP_RESULT_JSON_SCHEMA = appResultRawJsonSchema;
@@ -263,10 +267,25 @@ export function createInitialPromptProfiles(
   });
 }
 
+export function isLegacyMasterWritingRulesPlaceholder(profile: PromptProfile): boolean {
+  const placeholder = '[기본 테스트 지침 — 작가가 전용 프롬프트를 등록하면 즉시 교체됩니다]';
+  return profile.promptType === 'CORE_WRITING_RULES' &&
+    profile.title === LEGACY_ADVANCED_WRITING_CONTROL_TITLE &&
+    profile.currentVersionId === 'pver_init_1' &&
+    profile.currentVersionNumber === 1 &&
+    profile.content.trim() === placeholder &&
+    Array.isArray(profile.versions) &&
+    profile.versions.length <= 1 &&
+    profile.versions.every((version) =>
+      version.versionId === profile.currentVersionId &&
+      version.versionNumber === 1 &&
+      version.content === profile.content
+    );
+}
+
 /**
- * Non-destructively ensures that `NOVEL FORGE Master Writing Rules` (Version 1.0)
- * is registered in `Core Writing Rules` (`CORE_WRITING_RULES`) for a project,
- * upgrading unedited legacy v1 default slots while preserving any author-modified versions (`currentVersionNumber > 1`).
+ * Registers the built-in rules for projects without core rules and upgrades only
+ * the recognized legacy placeholder. Author content and history are preserved.
  */
 export function ensureMasterWritingRulesRegistered(
   profiles: PromptProfile[],
@@ -289,13 +308,7 @@ export function ensureMasterWritingRulesRegistered(
     }
 
     hasCoreRules = true;
-    const isUneditedLegacyDefault =
-      p.currentVersionNumber === 1 &&
-      (p.title === LEGACY_ADVANCED_WRITING_CONTROL_TITLE ||
-        p.content.includes('[기본 테스트 지침 — 작가가 전용 프롬프트를 등록하면 즉시 교체됩니다]') ||
-        !p.content.includes('**Version:** 1.0 (통합 최종본)'));
-
-    if (isUneditedLegacyDefault) {
+    if (isLegacyMasterWritingRulesPlaceholder(p)) {
       const updatedVersion: PromptVersion = {
         versionId: p.currentVersionId || 'pver_init_1',
         versionNumber: 1,
