@@ -19,6 +19,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Reject duplicate dependency lockfiles
+        shell: bash
+        run: |
+          if [[ -e package-lock.json || -L package-lock.json ]]; then
+            echo "Use bun install --frozen-lockfile and commit only bun.lock."
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
