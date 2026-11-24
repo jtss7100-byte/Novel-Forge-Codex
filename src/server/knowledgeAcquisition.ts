@@ -22,7 +22,7 @@ export async function resolveKnowledgeAcquisition(
   }
   if ((scene && !scene.sourceRevisionId) || (event && !event.sourceRevisionId)) return;
   const revisions = await Promise.all([...new Set(ids)].map((id) => reader.entity('revisions', id)));
-  if (!revisions.length || revisions.some((revision) => !revision || revision.episodeId !== input.episodeId)) return;
+  if (!revisions.length || revisions.some((revision) => !revision || revision.episodeId !== input.episodeId || typeof revision.content !== 'string')) return;
   if (!scene && !event && revisions[0]?.content !== episode?.content) return;
 
   const linkedEventProofs: [string, string, number][] = [];
@@ -43,7 +43,7 @@ export async function resolveKnowledgeAcquisition(
       if (!row || !isCanon(row) || row.sceneId !== sceneId || row.episodeId !== input.episodeId) break;
       const order = finite(row.chronologicalOrder);
       const revision = await reader.entity('revisions', row.sourceRevisionId);
-      if (order === undefined || revision?.episodeId !== input.episodeId) break;
+      if (order === undefined || revision?.episodeId !== input.episodeId || typeof revision.content !== 'string') break;
       linkedEventProofs.push([row.id, revision.id, order]);
     }
     if (linkedEventProofs.length === scene.eventIds.length) position.order = Math.max(...linkedEventProofs.map(([, , order]) => order));

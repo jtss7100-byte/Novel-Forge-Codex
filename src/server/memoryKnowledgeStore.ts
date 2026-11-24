@@ -10,7 +10,7 @@ import type { SceneMemoryRequirements } from '../types/sceneMemory';
 import { computeMemoryContentHash, RAG_ENGINE_DEFAULTS } from '../services/memorySearchProvider';
 import { annotationEligibility, hasKnowledgeScopeConflict, proposeMemoryKnowledge } from '../utils/memoryKnowledgeLogic';
 import { knowledgeStatus, temporalStatus, verifySceneMemoryProvenance, type SceneMemoryCandidate, type VerifiedMemorySource } from '../utils/sceneMemoryLogic';
-import { buildVerifiedSource, generationStatus, isCanon, makeSourceReader } from './memorySourceAuthority';
+import { buildVerifiedSource, episodePosition, generationStatus, isCanon, makeSourceReader } from './memorySourceAuthority';
 import { knowledgeHash, resolveKnowledgeAcquisition } from './knowledgeAcquisition';
 import type { FirestoreRagManifestDoc } from './ragEngine';
 
@@ -120,15 +120,6 @@ async function inspectAnnotation(row: MemoryKnowledgeAnnotation, ref: MemoryKnow
   }
 }
 
-async function attachLegacyAcquisition(source: VerifiedMemorySource, reader: ReturnType<typeof makeSourceReader>) {
-  if (source.legacyKnowledge?.scope !== 'CHARACTERS' || source.legacySceneScoped || !source.legacyKnowledge.effectiveEventId) return;
-  const event = await reader.entity('timelineEvents', source.legacyKnowledge.effectiveEventId);
-  if (!event || typeof event.episodeId !== 'string') return;
-  source.legacyAcquisition = (await resolveKnowledgeAcquisition(reader, {
-    episodeId: event.episodeId, eventId: event.id, method: 'UNKNOWN', characterId: '',
-  }))?.position;
-}
-
 export async function applyWriterMemoryKnowledge(db: Firestore, reader: ReturnType<typeof makeSourceReader>,
   ownerId: string, projectId: string, candidates: SceneMemoryCandidate[], target: SceneMemoryRequirements) {
   const slots = candidates.map(({ hit, source }) => {
@@ -144,7 +135,6 @@ export async function applyWriterMemoryKnowledge(db: Firestore, reader: ReturnTy
     const slot = slots[i];
     if (!slot) { source.knowledgeRejection = 'SOURCE_UNVERIFIED'; continue; }
     if (!byId.has(slot.id)) {
-      await attachLegacyAcquisition(source, reader);
       if (!source.knowledge) source.knowledgeRejection = 'POV_KNOWLEDGE_RESTRICTED';
       continue;
     }
@@ -264,8 +254,8 @@ async function projectCounts(db: Firestore, base: string, manifest?: FirestoreRa
 async function getTarget(reader: ReturnType<typeof makeSourceReader>, query: z.infer<typeof targetSchema>): Promise<SceneMemoryRequirements | undefined> {
   if (!query.targetEpisodeId) return;
   const episode = await reader.entity('episodes', query.targetEpisodeId);
-  const episodeNumber = optionalEpisode.safeParse(episode?.episodeNumber);
-  if (!episode || !episodeNumber.success || episodeNumber.data === undefined) throw new MemoryKnowledgeError('TEMPORAL_EVIDENCE_MISSING');
+  const episodeNumber = episodePosition(episode?.episodeNumber);
+  if (!episode || episodeNumber === undefined) throw new MemoryKnowledgeError('TEMPORAL_EVIDENCE_MISSING');
   const cutoff = query.targetEventId ? await reader.entity('timelineEvents', query.targetEventId) : undefined;
   const order = query.targetEventId && isCanon(cutoff) && typeof cutoff?.episodeId === 'string' ? (await resolveKnowledgeAcquisition(reader, {
     episodeId: cutoff.episodeId, eventId: query.targetEventId, characterId: '', method: 'UNKNOWN',
@@ -274,11 +264,29 @@ async function getTarget(reader: ReturnType<typeof makeSourceReader>, query: z.i
     throw new MemoryKnowledgeError('TEMPORAL_EVIDENCE_MISSING');
   }
   return {
-    projectId: episode.projectId, episodeId: episode.id, episodeNumber: episodeNumber.data, sceneNumber: query.targetSceneNumber,
+    projectId: episode.projectId, episodeId: episode.id, episodeNumber, sceneNumber: query.targetSceneNumber,
     perspective: 'THIRD_LIMITED', pointOfViewCharacterId: query.characterId, sceneGoal: '', characterIds: [],
     narrativeCutoff: query.targetEventId && order !== undefined ? { eventId: query.targetEventId, order } : undefined,
     requiredEventIds: [], relatedForeshadowingIds: [], relevantLocations: [], relevantWorldbuildingIds: [], semanticQueries: [], keywordQueries: [],
   };
+}
+
+function potentialWriterIssue(source: VerifiedMemorySource, record?: MemoryKnowledgeAnnotation) {
+  const resolved = source.foreshadowingPhase === 'RESOLVED' || source.foreshadowingPhase === 'ABANDONED';
+  const episodeBased = source.episodeNumber !== undefined && (!resolved || source.resolvedEpisodeNumber !== undefined);
+  const narrativeBased = source.narrativeOrder !== undefined && (!resolved || source.resolvedOrder !== undefined);
+  const timeless = source.knowledge?.timeless === true && source.episodeNumber === undefined && source.narrativeOrder === undefined &&
+    !source.foreshadowingPhase && !source.historicalState && !source.eventIds.length;
+  if (!episodeBased && !narrativeBased && !timeless) return 'TEMPORAL_EVIDENCE_MISSING';
+  if (record && record.verificationStatus !== 'AUTHOR_CONFIRMED') return 'POV_KNOWLEDGE_RESTRICTED';
+  const scope = record?.scope ?? source.legacyKnowledge?.scope;
+  if (scope === 'PUBLIC') return;
+  if (scope === 'CHARACTERS') {
+    const grants = record?.acquisition.filter((grant) => grant.method !== 'INFERRED' && grant.method !== 'UNKNOWN').map((grant) => grant.position) ?? [];
+    if (grants.some((position) => episodeBased || timeless || position.order !== undefined)) return;
+    return grants.length || !record ? 'TEMPORAL_EVIDENCE_MISSING' : 'POV_KNOWLEDGE_RESTRICTED';
+  }
+  return 'POV_KNOWLEDGE_RESTRICTED';
 }
 
 async function reviewRows(db: Firestore, ownerId: string, projectId: string, chunks: MemoryChunk[],
@@ -327,16 +335,14 @@ async function reviewRows(db: Firestore, ownerId: string, projectId: string, chu
           (timing === 'CURRENT_VALID_STATE' || timing === 'PAST_EVENT' || timing === 'SUPERSEDED_HISTORICAL_STATE');
         row.reason = row.knownAtTarget ? undefined : timing === 'FUTURE_INFORMATION' || timing === 'TEMPORAL_EVIDENCE_MISSING' || timing === 'SOURCE_UNVERIFIED' ? timing : eligibility;
       }
-      row.writerEligible = target ? Boolean(row.knownAtTarget) : row.annotation.scope === 'PUBLIC' ||
-        row.annotation.acquisition.some((grant) => grant.method !== 'INFERRED' && grant.method !== 'UNKNOWN');
-      if (!row.writerEligible && !target) row.reason = 'POV_KNOWLEDGE_RESTRICTED';
+      if (!target) row.reason = potentialWriterIssue(source, row.annotation);
+      row.writerEligible = target ? Boolean(row.knownAtTarget) : !row.reason;
       return row;
     }
     if (source && ref) {
-      await attachLegacyAcquisition(source, reader);
       row.status = source.legacyKnowledge ? source.legacyKnowledge.scope === 'CHARACTERS' ? 'PARTIALLY_ANNOTATED' : 'ANNOTATED' : 'UNANNOTATED';
-      row.writerEligible = source.legacyKnowledge?.scope === 'PUBLIC' ||
-        (source.legacyKnowledge?.scope === 'CHARACTERS' && !!source.legacyAcquisition);
+      row.reason = potentialWriterIssue(source);
+      row.writerEligible = !row.reason;
       if (target) {
         const timing = temporalStatus(target, source);
         const known = knowledgeStatus(target, source);

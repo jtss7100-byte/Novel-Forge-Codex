@@ -1,5 +1,5 @@
-import { annotationEligibility, compareKnowledgePosition } from './memoryKnowledgeLogic';
-import type { MemoryKnowledgeAnnotation, KnowledgePosition } from '../types/memoryKnowledge';
+import { annotationEligibility } from './memoryKnowledgeLogic';
+import type { MemoryKnowledgeAnnotation } from '../types/memoryKnowledge';
 import type { ScenePlanItem, WritingContextBundle } from '../types/aiEngine';
 import type { MemoryChunk, MemoryDocument, NarrativePerspective } from '../types/foundation';
 import type { MemoryKnowledgeEligibility, MemoryRejectionReason, MemoryRerankingSignal, MemoryRetrievalBudget, MemoryTemporalStatus, SceneMemoryKnowledge, SceneMemoryRequirements, SceneMemorySelection } from '../types/sceneMemory';
@@ -66,7 +66,6 @@ export interface VerifiedMemorySource {
   sceneNumber?: number;
   legacyKnowledge?: SceneMemoryKnowledge;
   durableKnowledge?: MemoryKnowledgeAnnotation;
-  legacyAcquisition?: KnowledgePosition;
   legacySceneScoped?: boolean;
   knowledgeRejection?: MemoryRejectionReason;
   episodeNumber?: number;
@@ -137,11 +136,8 @@ export function temporalStatus(requirements: SceneMemoryRequirements, source: Ve
 export function knowledgeStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): Exclude<MemoryKnowledgeEligibility, 'AUTHOR_KNOWLEDGE'> | MemoryRejectionReason {
   if (source.knowledgeRejection) return source.knowledgeRejection;
   if (source.durableKnowledge) return annotationEligibility(source.durableKnowledge, requirements);
-  if (source.legacyKnowledge?.scope === 'CHARACTERS' && !source.legacySceneScoped) {
-    if (!source.legacyAcquisition) return 'TEMPORAL_EVIDENCE_MISSING';
-    const timing = compareKnowledgePosition(source.legacyAcquisition, requirements);
-    if (timing !== 'BEFORE') return timing === 'FUTURE' ? 'FUTURE_INFORMATION' : 'TEMPORAL_EVIDENCE_MISSING';
-  }
+  // The date a fact takes effect does not prove when a character learned it.
+  if (source.legacyKnowledge?.scope === 'CHARACTERS' && !source.legacySceneScoped) return 'TEMPORAL_EVIDENCE_MISSING';
   const knowledge = source.knowledge;
   if (knowledge?.scope === 'AUTHOR_ONLY') return 'POV_KNOWLEDGE_RESTRICTED';
   if (knowledge?.scope === 'PUBLIC') return 'PUBLIC';

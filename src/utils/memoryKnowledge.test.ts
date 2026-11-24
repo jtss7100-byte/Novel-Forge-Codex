@@ -102,6 +102,9 @@ test('MK24: the synthetic A/B writer snapshot retains its existing proof format'
 
 test('MK25: an unknown acquisition, unverified source, or unresolved annotation conflict fails closed', () => {
   assert.equal(annotationEligibility({ ...approval, acquisition: [{ ...approval.acquisition[0], method: 'UNKNOWN' }] }, requirements), 'POV_KNOWLEDGE_RESTRICTED');
+  const legacyScope = { scope: 'CHARACTERS' as const, characterIds: ['seorin'], effectiveEventId: 'record-begins' };
+  assert.equal(selectSceneMemory(requirements, [{ ...legacy, source: { ...legacy.source, knowledge: legacyScope, legacyKnowledge: legacyScope } }],
+    sceneMemoryBudget()).rejected[0]?.reason, 'TEMPORAL_EVIDENCE_MISSING');
   assert.equal(verifySceneMemoryProvenance({ ownerId: legacy.source.ownerId, projectId: legacy.source.projectId,
     chunk: legacy.hit.chunk, document: legacy.hit.document, generation: 'ACTIVE' }), 'SOURCE_UNVERIFIED');
   assert.equal(selectSceneMemory(requirements, [{ ...legacy, source: { ...legacy.source, knowledgeRejection: 'KNOWLEDGE_SCOPE_CONFLICT' } }],

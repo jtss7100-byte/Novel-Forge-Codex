@@ -3,7 +3,7 @@ import { createSceneMemoryRetriever } from '../server/sceneMemoryRetrieval';
 import { listMemoryKnowledge, listMemoryKnowledgeApprovals, listMemoryKnowledgeHistory, saveMemoryKnowledge, summarizeMemoryKnowledge } from '../server/memoryKnowledgeStore';
 import { indexMemoryInputOnServer, setCustomGeminiEmbedContentForTesting, type FirestoreRagManifestDoc } from '../server/ragEngine';
 import { computeDeterministicSemanticEmbedding, extractProjectMemoryIndexInputs } from '../services/memorySearchProvider';
-import type { Episode, Scene, TimelineEvent } from '../types/novel';
+import type { Episode, Scene, TimelineEvent, WorldbuildingItem } from '../types/novel';
 import type { MemoryKnowledgeCommand, MemoryKnowledgeRow } from '../types/memoryKnowledge';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -3280,6 +3280,14 @@ test('Phase 4.4A Stage 1.1 — verified knowledge through real Firebase Auth and
       const before = await listMemoryKnowledge(first.db, owner.uid, { projectId, characterId: 'seorin',
         targetEpisodeId: episode.id, targetSceneNumber: 1, sourceEntityId: learn.id });
       assert.equal(before.rows[0].knownAtTarget, false);
+      const badRevision = first.db.doc(`${base}/revisions/rev300`);
+      const original = (await badRevision.get()).data()!;
+      try {
+        await badRevision.set({ ...scope, id: 'rev300', episodeId: episode.id });
+        assert.equal((await getWriter()).evidence.length, 0);
+        const checked = await listMemoryKnowledge(first.db, owner.uid, { projectId, sourceEntityId: learn.id });
+        assert.equal(checked.rows[0]?.status, 'STALE_ANNOTATION');
+      } finally { await badRevision.set(original); }
     });
 
     await t.test('MK13, MK21–MK23: selected-only partial bulk failure, accurate replay and stable originals', async () => {
@@ -3330,6 +3338,23 @@ test('Phase 4.4A Stage 1.1 — verified knowledge through real Firebase Auth and
       const archive = await listMemoryKnowledgeApprovals(second.db, sessionTwo.uid, { projectId });
       assert.equal(archive.entries.find((entry) => entry.record.id === annotationId)?.status, 'STALE_ANNOTATION');
       assert.equal((await first.db.doc(currentPath).get()).data()?.content, episode.content);
+      const era: WorldbuildingItem = { ...scope, id: 'without_time', title: '검증된 옛 기록', category: '기록',
+        summary: '모두에게 공유하자는 작가 설정', content: '이 원문에는 시점을 판단할 사건이 없다.', rules: '',
+        status: 'confirmed', canonStatus: 'CANON', linkedCharacterIds: [], linkedEpisodeIds: [],
+        sourceRevisionId: 'rev_world', createdAt: clock, updatedAt: clock };
+      await first.db.doc(`${base}/worldbuilding/${era.id}`).set(era);
+      const [worldIndex] = extractProjectMemoryIndexInputs({ ...scope, characters: [], worldbuilding: [era], episodes: [] });
+      setCustomGeminiEmbedContentForTesting(async ({ contents }) => ({ embeddings: [{ values: computeDeterministicSemanticEmbedding(contents, 768) }] }));
+      await indexMemoryInputOnServer(worldIndex, { db: first.db, cacheNamespace: run,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+      setCustomGeminiEmbedContentForTesting(null);
+      const [world] = (await listMemoryKnowledge(first.db, owner.uid, { projectId, sourceEntityId: era.id })).rows;
+      assert.ok(world.source);
+      assert.equal((await approve([input(world)])).results[0].ok, true);
+      const [checked] = (await listMemoryKnowledge(first.db, owner.uid, { projectId, sourceEntityId: era.id })).rows;
+      assert.equal(checked.status, 'ANNOTATED');
+      assert.equal(checked.writerEligible, false);
+      assert.equal(checked.reason, 'TEMPORAL_EVIDENCE_MISSING');
     });
   } finally {
     setCustomGeminiEmbedContentForTesting(null);
