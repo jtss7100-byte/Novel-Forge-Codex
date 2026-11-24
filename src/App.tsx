@@ -1,5 +1,6 @@
 import type { NarrativeNode } from './types/narrativeMemory';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { episodeSaveSignature } from './utils/episodeSavePayload';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   onAuthStateChanged,
   signInWithPopup,
@@ -158,6 +159,7 @@ const ACTIVE_EPISODE_STORAGE_KEY = 'novelforge_active_episode_id_v1';
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState<boolean>(false);
+  const authGeneration = useRef(0);
   const [serverAuthStatus, setServerAuthStatus] = useState<ServerAuthStatus | null>(null);
 
   const [bundles, setBundles] = useState<ProjectBundle[]>(() => loadLocalBundles());
@@ -269,7 +271,7 @@ export default function App() {
     [getIdToken]
   );
 
-  const verifyTokenWithServer = useCallback(async (user: User | null) => {
+  const verifyTokenWithServer = useCallback(async (user: User | null, generation = authGeneration.current) => {
     try {
       const headers: Record<string, string> = {};
       if (user) {
@@ -279,7 +281,7 @@ export default function App() {
       const res = await fetch('/api/auth/verify', { headers });
       if (res.ok) {
         const data = (await res.json()) as ServerAuthStatus;
-        setServerAuthStatus(data);
+        if (authGeneration.current === generation) setServerAuthStatus(data);
       }
     } catch {
       // ignore if offline
@@ -289,21 +291,32 @@ export default function App() {
   // Listen to Firebase Auth state and load Firestore data when signed in
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      const generation = ++authGeneration.current;
+      const ownerId = user?.uid ?? 'local_author';
+      const isCurrent = () => authGeneration.current === generation;
       setCurrentUser(user);
       setAuthReady(true);
-      await verifyTokenWithServer(user);
+      setServerAuthStatus(null);
+      setBundles((previous) => {
+        const owned = previous.filter((bundle) => bundle.project.ownerId === ownerId);
+        return owned.length ? owned : loadLocalBundles(ownerId, false);
+      });
+      setIsLoadingCloud(Boolean(user));
+      void verifyTokenWithServer(user, generation);
 
       if (user) {
-        setIsLoadingCloud(true);
         setErrorBanner(null);
         try {
           const cloudProjects = await fetchFirestoreProjects(user.uid);
+          if (!isCurrent()) return;
           if (cloudProjects.length === 0) {
             // Seed initial local bundle into user's Firestore so they immediately have data in cloud
             const local = loadLocalBundles(user.uid);
             const uploaded: ProjectBundle[] = [];
             for (const b of local) {
+              if (!isCurrent()) return;
               const synced = await uploadProjectBundleToFirestore(user.uid, b);
+              if (!isCurrent()) return;
               uploaded.push(synced);
             }
             setBundles(uploaded);
@@ -314,10 +327,14 @@ export default function App() {
           } else {
             const loadedBundles: ProjectBundle[] = [];
             for (const proj of cloudProjects) {
-              const details = await fetchFirestoreProjectDetails(user.uid, proj.id);
-              const phase2 = await fetchFirestorePhase2Collections(user.uid, proj.id);
-              const foundation = await fetchFirestoreFoundationCollections(user.uid, proj.id);
-              const approvalAudits = await fetchFirestoreApprovalAudits(user.uid, proj.id);
+              if (!isCurrent()) return;
+              const [details, phase2, foundation, approvalAudits] = await Promise.all([
+                fetchFirestoreProjectDetails(user.uid, proj.id),
+                fetchFirestorePhase2Collections(user.uid, proj.id, { includeChangeProposals: false }),
+                fetchFirestoreFoundationCollections(user.uid, proj.id),
+                fetchFirestoreApprovalAudits(user.uid, proj.id),
+              ]);
+              if (!isCurrent()) return;
               let promptProfiles = phase2.writingPromptProfiles;
               if (promptProfiles.length === 0) {
                 promptProfiles = createInitialPromptProfiles(
@@ -326,16 +343,11 @@ export default function App() {
                   new Date().toISOString()
                 );
                 for (const p of promptProfiles) {
+                  if (!isCurrent()) return;
                   await createFirestorePromptProfile(user.uid, proj.id, p);
                 }
               }
-              const mergedProposalsMap = new Map<string, ChangeProposal>();
-              for (const cp of foundation.changeProposals) {
-                mergedProposalsMap.set(cp.id, cp);
-              }
-              for (const cp of phase2.changeProposals) {
-                mergedProposalsMap.set(cp.id, cp);
-              }
+
               loadedBundles.push({
                 formatVersion: '1.0',
                 exportedAt: new Date().toISOString(),
@@ -348,10 +360,11 @@ export default function App() {
                 styleProfiles: foundation.styleProfiles,
                 writingPromptProfiles: promptProfiles,
                 writingPlans: phase2.writingPlans,
-                changeProposals: Array.from(mergedProposalsMap.values()),
+                changeProposals: foundation.changeProposals,
                 approvalAudits,
               });
             }
+            if (!isCurrent()) return;
             setBundles(loadedBundles);
             saveLocalBundles(loadedBundles);
             setActiveProjectId((prev) =>
@@ -363,9 +376,9 @@ export default function App() {
         } catch (err) {
           const msg =
             err instanceof Error ? err.message : 'Firestore 데이터를 불러오는 중 오류가 발생했습니다.';
-          setErrorBanner(msg);
+          if (isCurrent()) setErrorBanner(msg);
         } finally {
-          setIsLoadingCloud(false);
+          if (isCurrent()) setIsLoadingCloud(false);
         }
       } else {
         const local = loadLocalBundles('local_author');
@@ -373,7 +386,10 @@ export default function App() {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      authGeneration.current++;
+      unsubscribe();
+    };
   }, [verifyTokenWithServer]);
 
   // Persist active project and episode IDs
@@ -389,14 +405,18 @@ export default function App() {
     }
   }, [selectedEpisodeId]);
 
-  const projects = useMemo(() => bundles.map((b) => b.project), [bundles]);
+  const editorOwnerId = currentUser?.uid ?? 'local_author';
+  const ownedBundles = useMemo(() => bundles.filter((bundle) => bundle.project.ownerId === editorOwnerId), [bundles, editorOwnerId]);
+  const projects = useMemo(() => ownedBundles.map((b) => b.project), [ownedBundles]);
 
   const activeBundle = useMemo(() => {
-    if (!bundles.length) return null;
-    return bundles.find((b) => b.project.id === activeProjectId) || bundles[0];
-  }, [bundles, activeProjectId]);
+    return ownedBundles.find((b) => b.project.id === activeProjectId) ?? ownedBundles[0] ?? null;
+  }, [ownedBundles, activeProjectId]);
 
   const activeProject = activeBundle?.project || null;
+  const editorScope = JSON.stringify([editorOwnerId, activeProject?.id, selectedEpisodeId]);
+  const visibleEditorScope = useRef(editorScope);
+  visibleEditorScope.current = editorScope;
   const characters = activeBundle?.characters || [];
   const worldbuilding = activeBundle?.worldbuilding || [];
   const episodes = activeBundle?.episodes || [];
@@ -429,7 +449,7 @@ export default function App() {
     (updater: (prev: ProjectBundle[]) => ProjectBundle[]) => {
       setBundles((prev) => {
         const next = updater(prev);
-        saveLocalBundles(next);
+        saveLocalBundles(next, auth.currentUser?.uid ?? 'local_author');
         return next;
       });
     },
@@ -646,17 +666,27 @@ export default function App() {
       backupRevisionLabel?: string;
       expectedRevisionId?: string;
       expectedContentHash?: string;
+      expectedSavePayloadHash?: string;
+      deduplicate?: boolean;
     }
-  ): Promise<EpisodeRevisionCommitResult | void> => {
-    if (!activeProject) return;
+  ): Promise<EpisodeRevisionCommitResult> => {
+    const uid = editorOwnerId;
+    const generation = authGeneration.current;
+    const isCurrentAccount = () => authGeneration.current === generation &&
+      (auth.currentUser?.uid ?? 'local_author') === uid;
+    if (!isCurrentAccount() || activeProject?.id !== updated.projectId ||
+        activeProject.ownerId !== uid || updated.ownerId !== uid) {
+      throw new Error('[SAVE_SCOPE_CHANGED] 저장 대상 계정이나 작품이 바뀌었습니다.');
+    }
     const nowIso = new Date().toISOString();
-    const uid = currentUser?.uid || 'local_author';
     const commitInput = {
       uid,
       projectId: activeProject.id,
       updatedEpisode: updated,
       expectedRevisionId: options?.expectedRevisionId,
       expectedContentHash: options?.expectedContentHash,
+      expectedSavePayloadHash: options?.expectedSavePayloadHash,
+      deduplicate: options?.deduplicate,
       createBackupRevisionFirst: Boolean(options?.createBackupRevisionFirst),
       backupRevisionLabel: options?.backupRevisionLabel,
       createRevision: Boolean(options?.createRevision),
@@ -665,56 +695,54 @@ export default function App() {
     };
 
     let commitResult: EpisodeRevisionCommitResult;
-    try {
-      if (currentUser) {
-        commitResult = await commitEpisodeRevisionSafelyFirestore(commitInput);
-        setBundles((prev) => {
-          const next = prev.map((b) => {
-            if (b.project.id !== activeProject.id) return b;
-            const addedRevs = [
-              ...(commitResult.targetRevision ? [commitResult.targetRevision] : []),
-              ...(commitResult.backupRevision ? [commitResult.backupRevision] : []),
-            ];
-            return {
-              ...b,
-              project: { ...b.project, updatedAt: nowIso },
-              episodes: b.episodes
-                .map((ep) =>
-                  ep.id === commitResult.episode.id ? commitResult.episode : ep
-                )
-                .sort((a, c) => a.episodeNumber - c.episodeNumber),
-              revisions: [...addedRevs, ...b.revisions],
-            };
-          });
-          try {
-            saveLocalBundles(next);
-          } catch {
-            // Best-effort local mirror when cloud commit has succeeded
-          }
-          return next;
+    if (currentUser) {
+      commitResult = await commitEpisodeRevisionSafelyFirestore(commitInput);
+      if (!isCurrentAccount()) return commitResult;
+      setBundles((prev) => {
+        const next = prev.map((b) => {
+          if (!isCurrentAccount() || b.project.ownerId !== uid || b.project.id !== activeProject.id) return b;
+          const current = b.episodes.find((episode) => episode.id === commitResult.episode.id);
+          if (!current || (commitResult.unchanged &&
+              current.latestRevisionId === commitResult.episode.latestRevisionId &&
+              episodeSaveSignature(current) === episodeSaveSignature(commitResult.episode))) return b;
+          const addedRevs = [
+            ...(commitResult.targetRevision ? [commitResult.targetRevision] : []),
+            ...(commitResult.backupRevision ? [commitResult.backupRevision] : []),
+          ];
+          return {
+            ...b,
+            project: { ...b.project, updatedAt: nowIso },
+            episodes: b.episodes
+              .map((ep) =>
+                ep.id === commitResult.episode.id ? commitResult.episode : ep
+              )
+              .sort((a, c) => a.episodeNumber - c.episodeNumber),
+            revisions: [...addedRevs, ...b.revisions],
+          };
         });
-      } else {
-        const localRes = await commitEpisodeRevisionSafelyLocal({
-          bundles,
-          commitInput,
-        });
-        commitResult = {
-          episode: localRes.episode,
-          backupRevision: localRes.backupRevision,
-          targetRevision: localRes.targetRevision,
-        };
-        setBundles(localRes.nextBundles);
-      }
-    } catch (error) {
-      const msg =
-        error instanceof Error
-          ? error.message
-          : '원고 안전 저장(CAS) 중 오류가 발생해 원고를 롤백했습니다.';
-      setSaveState('error');
-      setErrorBanner(msg);
-      throw error;
+        try {
+          if (options?.createRevision) saveLocalBundles(next, uid);
+        } catch {
+          // Best-effort local mirror for an explicit cloud snapshot
+        }
+        return next.every((bundle, index) => bundle === prev[index]) ? prev : next;
+      });
+    } else {
+      const localRes = await commitEpisodeRevisionSafelyLocal({
+        bundles,
+        commitInput,
+      });
+      commitResult = {
+        episode: localRes.episode,
+        backupRevision: localRes.backupRevision,
+        targetRevision: localRes.targetRevision,
+        unchanged: localRes.unchanged,
+      };
+      if (!isCurrentAccount() || commitResult.unchanged) return commitResult;
+      setBundles((previous) => isCurrentAccount() ? localRes.nextBundles : previous);
     }
 
+    if (commitResult.unchanged) return commitResult;
     const committedEpisode = commitResult.episode;
     const addedRevisions = [
       ...(commitResult.targetRevision ? [commitResult.targetRevision] : []),
@@ -766,7 +794,9 @@ export default function App() {
       }
     }
 
-    setLastSavedAt(nowIso);
+    if (isCurrentAccount() && visibleEditorScope.current === editorScope) {
+      setLastSavedAt(nowIso);
+    }
     return commitResult;
   };
 
@@ -1739,7 +1769,7 @@ export default function App() {
       if (remote) {
         updateBundlesAndPersist((prev) =>
           prev.map((b) => {
-            if (b.project.id !== activeProject.id) return b;
+            if (b.project.id !== activeProject.id || b.project.ownerId !== currentUser.uid) return b;
             const currentList = b.writingPromptProfiles || [];
             const exists = currentList.some((p) => p.id === remote.id);
             return {
@@ -2119,18 +2149,12 @@ export default function App() {
 
   const handleRefreshApprovalWorkspaceData = useCallback(async () => {
     if (!activeProject || !currentUser) return;
-    const [foundation, phase2, audits] = await Promise.all([
+    const generation = authGeneration.current;
+    const [foundation, audits] = await Promise.all([
       fetchFirestoreFoundationCollections(currentUser.uid, activeProject.id),
-      fetchFirestorePhase2Collections(currentUser.uid, activeProject.id),
       fetchFirestoreApprovalAudits(currentUser.uid, activeProject.id),
     ]);
-    const mergedProposalsMap = new Map<string, ChangeProposal>();
-    for (const cp of foundation.changeProposals) {
-      mergedProposalsMap.set(cp.id, cp);
-    }
-    for (const cp of phase2.changeProposals) {
-      mergedProposalsMap.set(cp.id, cp);
-    }
+    if (generation !== authGeneration.current) return;
     updateBundlesAndPersist((prev) =>
       prev.map((b) =>
         b.project.id === activeProject.id
@@ -2140,7 +2164,7 @@ export default function App() {
               relationships: foundation.relationships,
               timelineEvents: foundation.timelineEvents,
               foreshadowings: foundation.foreshadowings,
-              changeProposals: Array.from(mergedProposalsMap.values()),
+              changeProposals: foundation.changeProposals,
               approvalAudits: audits,
             }
           : b
@@ -3118,6 +3142,8 @@ export default function App() {
 
           {activeTab === 'manuscript' && activeProject && (
             <ManuscriptView
+              key={editorScope}
+              ownerId={editorOwnerId}
               projectId={activeProject.id}
               project={activeProject}
               voiceRewriteSelection={voiceRewriteSelection?.projectId === activeProject.id ? voiceRewriteSelection : null}

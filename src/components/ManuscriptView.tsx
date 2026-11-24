@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   BookOpen,
@@ -18,7 +18,6 @@ import {
 import type {
   ChangeProposal,
   Character,
-  EmergencyDraftBackup,
   Episode,
   EpisodeStatus,
   Project,
@@ -31,13 +30,15 @@ import type {
 import {
   calculateCharCounts,
   computeRevisionDiffSummary,
+  generateEntityId,
   validateEpisodeInput,
 } from '../utils/novelLogic';
 import {
-  clearEmergencyDraft,
-  getEmergencyDraft,
-  saveEmergencyDraft,
-} from '../services/novelRepository';
+  acknowledgeEpisodeDraft, persistEpisodeDraft, readEpisodeDrafts,
+  type DraftScope, type DurableEpisodeDraft,
+} from '../services/episodeDraftStore';
+import { EpisodeSaveScheduler, classifyEpisodeSaveError, retryEpisodeAutosave, serializeEpisodeSave } from '../utils/episodeSaveScheduler';
+import { episodeSavePayloadHash, episodeSaveSignature } from '../utils/episodeSavePayload';
 import type { EpisodeRevisionCommitResult } from '../services/novelRepository';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity';
 import { ConfirmModal } from './ConfirmModal';
@@ -45,6 +46,7 @@ import { AiWritingPanel } from './AiWritingPanel';
 import type { VoiceRewriteSelection } from './CharacterVoicePanel';
 
 interface ManuscriptViewProps {
+  ownerId: string;
   voiceRewriteSelection?: VoiceRewriteSelection | null;
   projectId: string;
   project: Project;
@@ -73,6 +75,8 @@ interface ManuscriptViewProps {
       backupRevisionLabel?: string;
       expectedRevisionId?: string;
       expectedContentHash?: string;
+      expectedSavePayloadHash?: string;
+      deduplicate?: boolean;
     }
   ) => Promise<EpisodeRevisionCommitResult | void>;
   onDeleteEpisode: (episodeId: string) => Promise<void>;
@@ -99,7 +103,20 @@ interface ManuscriptViewProps {
   onSaveStateChange: (state: SaveState, errorMsg?: string) => void;
 }
 
+type SaveOptions = NonNullable<Parameters<ManuscriptViewProps['onSaveEpisode']>[1]>;
+
+interface EditorSaveSession {
+  scope: DraftScope;
+  writerId: string;
+  sequence: number;
+  baseline: Episode;
+  latest?: DurableEpisodeDraft;
+  retryOnReconnect?: boolean;
+  scheduler: EpisodeSaveScheduler<DurableEpisodeDraft>;
+}
+
 export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
+  ownerId,
   voiceRewriteSelection,
   projectId,
   project,
@@ -151,7 +168,11 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
   const [linkedCharacterIds, setLinkedCharacterIds] = useState<string[]>([]);
   const [linkedWorldbuildingIds, setLinkedWorldbuildingIds] = useState<string[]>([]);
 
-  const [emergencyBackup, setEmergencyBackup] = useState<EmergencyDraftBackup | null>(null);
+  const [recoveryDrafts, setRecoveryDrafts] = useState<DurableEpisodeDraft[]>([]);
+  const [selectedRecoveryWriter, setSelectedRecoveryWriter] = useState('');
+  const emergencyBackup = recoveryDrafts.find((draft) => draft.writerId === selectedRecoveryWriter) ?? recoveryDrafts[0];
+  const [localDraftStatus, setLocalDraftStatus] = useState<string | null>(null);
+  const [unprotectedInput, setUnprotectedInput] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [revisionLabelInput, setRevisionLabelInput] = useState<string>('');
   const [isCreatingEpisode, setIsCreatingEpisode] = useState<boolean>(false);
@@ -163,10 +184,9 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
     excerpt: string;
   } | null>(null);
 
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeEpisodeIdRef = useRef<string | null>(null);
-  const expectedRevisionIdRef = useRef<string>('');
-  const expectedContentHashRef = useRef<string>('');
+  const saveSessionRef = useRef<EditorSaveSession | null>(null);
+  const saveHandlers = useRef({ onSaveEpisode, onSaveStateChange });
+  saveHandlers.current = { onSaveEpisode, onSaveStateChange };
   const manuscriptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const captureTextareaSelection = (el: HTMLTextAreaElement | null) => {
@@ -184,58 +204,60 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
     }
   };
 
-  // Sync editor fields when switching active episode
-  useEffect(() => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
+  useLayoutEffect(() => {
+    setRecoveryDrafts([]);
+    setLocalDraftStatus(null);
+    setUnprotectedInput(false);
+    setValidationError(null);
+    setEditorSelection(null);
+    if (!activeEpisode || project.ownerId !== ownerId) return;
 
-    if (!activeEpisode) {
-      activeEpisodeIdRef.current = null;
-      expectedRevisionIdRef.current = '';
-      expectedContentHashRef.current = '';
-      setEditorSelection(null);
-      return;
-    }
+    const scope: DraftScope = [ownerId, projectId, activeEpisode.id];
+    const session: EditorSaveSession = {
+      scope, writerId: generateEntityId('writer'), sequence: 0, baseline: activeEpisode,
+      scheduler: new EpisodeSaveScheduler((draft) => saveQueuedDraft(session, draft)),
+    };
+    saveSessionRef.current = session;
+    setEpisodeNumber(activeEpisode.episodeNumber);
+    setTitle(activeEpisode.title);
+    setContent(activeEpisode.content);
+    setSynopsis(activeEpisode.synopsis);
+    setAuthorNote(activeEpisode.authorNote);
+    setStatus(activeEpisode.status);
+    setLinkedCharacterIds(activeEpisode.linkedCharacterIds);
+    setLinkedWorldbuildingIds(activeEpisode.linkedWorldbuildingIds);
 
-    if (activeEpisodeIdRef.current !== activeEpisode.id) {
-      activeEpisodeIdRef.current = activeEpisode.id;
-      expectedRevisionIdRef.current = activeEpisode.latestRevisionId || '';
-      expectedContentHashRef.current =
-        activeEpisode.contentHash || computeManuscriptContentHash(activeEpisode.content);
-      setEpisodeNumber(activeEpisode.episodeNumber);
-      setTitle(activeEpisode.title);
-      setContent(activeEpisode.content);
-      setSynopsis(activeEpisode.synopsis);
-      setAuthorNote(activeEpisode.authorNote);
-      setStatus(activeEpisode.status);
-      setLinkedCharacterIds(activeEpisode.linkedCharacterIds);
-      setLinkedWorldbuildingIds(activeEpisode.linkedWorldbuildingIds);
-      setValidationError(null);
-      setEditorSelection(null);
-
-      // Check if an unsaved emergency draft exists for this episode
-      const existingEmergency = getEmergencyDraft(projectId, activeEpisode.id);
-      if (
-        existingEmergency &&
-        (existingEmergency.content !== activeEpisode.content ||
-          existingEmergency.title !== activeEpisode.title)
-      ) {
-        setEmergencyBackup(existingEmergency);
-      } else {
-        setEmergencyBackup(null);
+    void readEpisodeDrafts(scope).then((drafts) => {
+      if (saveSessionRef.current === session) {
+        setRecoveryDrafts(drafts.filter((draft) =>
+          episodeSaveSignature(draft.episode) !== episodeSaveSignature(session.baseline)));
       }
-    }
-  }, [activeEpisode, projectId]);
-
-  useEffect(() => {
-    return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
+    }).catch(() => {
+      if (saveSessionRef.current === session) setLocalDraftStatus('로컬 복구 저장소를 읽을 수 없습니다.');
+    });
+    const onReconnect = () => {
+      if (session.retryOnReconnect && session.latest && saveSessionRef.current === session) {
+        session.retryOnReconnect = false;
+        session.scheduler.schedule(session.latest);
       }
     };
-  }, []);
+    window.addEventListener('online', onReconnect);
+    return () => {
+      window.removeEventListener('online', onReconnect);
+      session.scheduler.dispose();
+      if (saveSessionRef.current === session) saveSessionRef.current = null;
+    };
+  }, [ownerId, projectId, activeEpisode?.id]);
+
+  useEffect(() => {
+    if (!unprotectedInput) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [unprotectedInput]);
 
   const charMetrics = useMemo(() => calculateCharCounts(content), [content]);
 
@@ -269,141 +291,169 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
     };
   };
 
-  const triggerDebouncedAutoSave = (draftOverrides?: Partial<Episode>) => {
-    if (!activeEpisode) return;
-    const candidate = buildUpdatedEpisode(draftOverrides);
-    if (!candidate) return;
+  function saveCandidate(
+    session: EditorSaveSession, candidate: Episode, options: SaveOptions, retry = false,
+  ): Promise<EpisodeRevisionCommitResult> {
+    const base = session.baseline;
+    const candidateToSave = { ...candidate, latestRevisionId: base.latestRevisionId };
+    const isCurrent = () => saveSessionRef.current === session;
+    const send = async () => {
+      if (!isCurrent()) throw new Error('[SAVE_SCOPE_CHANGED] 편집 중인 회차가 바뀌었습니다.');
+      const result = await saveHandlers.current.onSaveEpisode(candidateToSave, {
+        ...options,
+        expectedRevisionId: base.latestRevisionId || '',
+        expectedContentHash: base.contentHash || computeManuscriptContentHash(base.content),
+        expectedSavePayloadHash: episodeSavePayloadHash(base),
+      });
+      if (!result) throw new Error('[SAVE_SCOPE_CHANGED] 편집 중인 회차가 바뀌었습니다.');
+      session.baseline = result.episode;
+      return result;
+    };
+    return serializeEpisodeSave(session.scope, () => retry ? retryEpisodeAutosave(send, isCurrent) : send());
+  }
 
-    // 1. Always write immediately to local crash/error recovery buffer
-    saveEmergencyDraft({
-      projectId,
-      episodeId: candidate.id,
-      title: candidate.title,
-      content: candidate.content,
-      synopsis: candidate.synopsis,
-      authorNote: candidate.authorNote,
-      status: candidate.status,
-      savedAt: new Date().toISOString(),
-      reason: 'typing_buffer',
+  function reportSaveError(session: EditorSaveSession, sequence: number, error: unknown) {
+    if (saveSessionRef.current !== session || session.sequence !== sequence) return;
+    const kind = classifyEpisodeSaveError(error);
+    const messages = {
+      NETWORK_ERROR: '네트워크 오류로 원격 저장이 보류됐습니다.',
+      AUTH_ERROR: '로그인이 필요해 원격 저장이 보류됐습니다.',
+      PERMISSION_DENIED: '회차가 삭제됐거나 이 회차에 저장할 권한이 없습니다.',
+      REVISION_CONFLICT: '다른 저장본과 충돌했습니다. 현재 원고와 로컬 복구본을 확인하세요.',
+      DOCUMENT_TOO_LARGE: '원격 문서의 크기 한도를 넘었습니다.',
+      LOCAL_STORAGE_ERROR: '저장 공간이 부족합니다.',
+      SAVE_SCOPE_CHANGED: '편집 중인 회차가 바뀌었습니다.',
+      SAVE_ERROR: '회차를 저장할 수 없습니다.',
+    };
+    saveHandlers.current.onSaveStateChange('error', messages[kind]);
+    void readEpisodeDrafts(session.scope).then((drafts) => {
+      if (saveSessionRef.current === session && session.sequence === sequence) setRecoveryDrafts(drafts);
+    }).catch(() => {});
+  }
+
+  async function acknowledgeDraft(draft: DurableEpisodeDraft) {
+    await acknowledgeEpisodeDraft(draft);
+    const session = saveSessionRef.current;
+    if (session && session.scope.every((id, index) => id === draft.scope[index])) {
+      setRecoveryDrafts((current) => current.filter((item) =>
+        item.writerId !== draft.writerId || item.sequence !== draft.sequence));
+    }
+  }
+
+  async function saveQueuedDraft(session: EditorSaveSession, draft: DurableEpisodeDraft) {
+    if (saveSessionRef.current !== session || session.sequence !== draft.sequence) return;
+    const isLatest = () => saveSessionRef.current === session && session.sequence === draft.sequence;
+    saveHandlers.current.onSaveStateChange('saving');
+    try {
+      if (episodeSaveSignature(draft.episode) !== episodeSaveSignature(session.baseline)) {
+        await saveCandidate(session, draft.episode, { createRevision: false, deduplicate: true }, true);
+      }
+    } catch (error) {
+      if (isLatest()) session.retryOnReconnect = classifyEpisodeSaveError(error) === 'NETWORK_ERROR';
+      reportSaveError(session, draft.sequence, error);
+      return;
+    }
+    if (isLatest()) {
+      session.latest = undefined;
+      saveHandlers.current.onSaveStateChange('saved');
+      setUnprotectedInput(false);
+      setLocalDraftStatus(null);
+    }
+    try {
+      await acknowledgeDraft(draft);
+    } catch {
+      if (isLatest()) setLocalDraftStatus('저장 완료 · 로컬 복구본을 정리하지 못했습니다.');
+    }
+  }
+
+  const triggerDebouncedAutoSave = (draftOverrides?: Partial<Episode>) => {
+    const session = saveSessionRef.current;
+    const candidate = buildUpdatedEpisode(draftOverrides);
+    if (!session || !candidate) return;
+    const signature = episodeSaveSignature(candidate);
+    if (signature === episodeSaveSignature(session.latest?.episode ?? session.baseline)) return;
+
+    const draft: DurableEpisodeDraft = {
+      scope: session.scope, writerId: session.writerId, sequence: ++session.sequence, episode: candidate,
+      baseRevisionId: session.baseline.latestRevisionId || '',
+      baseContentHash: session.baseline.contentHash || computeManuscriptContentHash(session.baseline.content),
+      baseSavePayloadHash: episodeSavePayloadHash(session.baseline),
+      savedAt: Date.now(),
+    };
+    session.latest = draft;
+    session.retryOnReconnect = false;
+    saveHandlers.current.onSaveStateChange('idle');
+    setUnprotectedInput(true);
+    setLocalDraftStatus('로컬 복구본 저장 중');
+    void persistEpisodeDraft(draft).then(() => {
+      if (saveSessionRef.current === session && session.latest?.sequence === draft.sequence) {
+        setUnprotectedInput(false);
+        setLocalDraftStatus(ownerId === 'local_author' ? '로컬 보존 · 작품 저장 대기' : '로컬 보존 · 원격 저장 대기');
+      }
+    }).catch(() => {
+      if (saveSessionRef.current === session && session.latest?.sequence === draft.sequence) {
+        setLocalDraftStatus('로컬 복구본 저장 실패 · 이 창의 원고를 보존하세요.');
+      }
     });
 
     const check = validateEpisodeInput(candidate);
     if (!check.valid) {
+      session.scheduler.cancelPending();
       setValidationError(check.error || '입력값 검증 오류');
-      onSaveStateChange('error', check.error);
       return;
     }
     setValidationError(null);
-    onSaveStateChange('saving');
-
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-    }
-
-    const syncCasRefsFromCommit = (
-      commitResult: EpisodeRevisionCommitResult | void,
-      fallbackContent: string
-    ) => {
-      if (commitResult?.episode) {
-        expectedRevisionIdRef.current = commitResult.episode.latestRevisionId || '';
-        expectedContentHashRef.current =
-          commitResult.episode.contentHash ||
-          computeManuscriptContentHash(commitResult.episode.content);
-      } else {
-        expectedContentHashRef.current = computeManuscriptContentHash(fallbackContent);
-      }
-    };
-
-    debounceTimerRef.current = setTimeout(async () => {
-      try {
-        const res = await onSaveEpisode(candidate, {
-          createRevision: false,
-          expectedRevisionId: expectedRevisionIdRef.current,
-          expectedContentHash: expectedContentHashRef.current,
-        });
-        syncCasRefsFromCommit(res, candidate.content);
-        clearEmergencyDraft(projectId, candidate.id);
-        setEmergencyBackup(null);
-        onSaveStateChange('saved');
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : '자동 저장 중 오류 발생';
-        saveEmergencyDraft({
-          projectId,
-          episodeId: candidate.id,
-          title: candidate.title,
-          content: candidate.content,
-          synopsis: candidate.synopsis,
-          authorNote: candidate.authorNote,
-          status: candidate.status,
-          savedAt: new Date().toISOString(),
-          reason: 'save_error',
-          errorMessage: msg,
-        });
-        setEmergencyBackup(getEmergencyDraft(projectId, candidate.id));
-        onSaveStateChange('error', msg);
-      }
-    }, 1000);
+    session.scheduler.schedule(draft);
   };
 
-  const handleManualSave = async (createSnapshot = true) => {
-    if (!activeEpisode) return;
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-
-    const candidate = buildUpdatedEpisode();
-    if (!candidate) return;
-
+  async function saveExplicit(
+    candidate: Episode, options: SaveOptions, onCurrentSuccess: () => void, recovered = false,
+  ): Promise<EpisodeRevisionCommitResult> {
+    const session = saveSessionRef.current;
+    if (!session) throw new Error('[SAVE_SCOPE_CHANGED] 편집 중인 회차가 바뀌었습니다.');
+    const { sequence, latest } = session;
     const check = validateEpisodeInput(candidate);
     if (!check.valid) {
       setValidationError(check.error || '입력값을 확인해 주세요.');
-      onSaveStateChange('error', check.error);
-      return;
+      throw new Error(check.error || '회차 입력값이 올바르지 않습니다.');
     }
-
     setValidationError(null);
-    onSaveStateChange('saving');
-
-    try {
-      const label =
-        revisionLabelInput.trim() ||
-        `${candidate.status === 'confirmed' ? '확정' : '수동'} 저장 (${
-          candidate.charCountWithSpaces
-        }자)`;
-      const res = await onSaveEpisode(candidate, {
-        createRevision: createSnapshot,
-        revisionLabel: label,
-        expectedRevisionId: expectedRevisionIdRef.current,
-        expectedContentHash: expectedContentHashRef.current,
-      });
-      if (res?.episode) {
-        expectedRevisionIdRef.current = res.episode.latestRevisionId || '';
-        expectedContentHashRef.current =
-          res.episode.contentHash || computeManuscriptContentHash(res.episode.content);
-      } else {
-        expectedContentHashRef.current = computeManuscriptContentHash(candidate.content);
+    session.scheduler.cancelPending();
+    return session.scheduler.runExclusive(async () => {
+      if (session.sequence !== sequence) throw new Error('[SAVE_SCOPE_CHANGED] 저장 요청 이후 원고가 수정됐습니다.');
+      saveHandlers.current.onSaveStateChange('saving');
+      try {
+        const result = await saveCandidate(session, candidate, options);
+        if (saveSessionRef.current === session && session.sequence === sequence) {
+          onCurrentSuccess();
+          saveHandlers.current.onSaveStateChange(recovered ? 'recovered' : 'saved');
+          if (latest && episodeSaveSignature(latest.episode) === episodeSaveSignature(result.episode)) {
+            session.latest = undefined;
+            setUnprotectedInput(false);
+            setLocalDraftStatus(null);
+            void acknowledgeDraft(latest).catch(() =>
+              setLocalDraftStatus('저장 완료 · 로컬 복구본을 정리하지 못했습니다.'));
+          }
+        }
+        return result;
+      } catch (error) {
+        reportSaveError(session, sequence, error);
+        throw error;
       }
-      setRevisionLabelInput('');
-      clearEmergencyDraft(projectId, candidate.id);
-      setEmergencyBackup(null);
-      onSaveStateChange('saved');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '수동 저장 실패';
-      saveEmergencyDraft({
-        projectId,
-        episodeId: candidate.id,
-        title: candidate.title,
-        content: candidate.content,
-        synopsis: candidate.synopsis,
-        authorNote: candidate.authorNote,
-        status: candidate.status,
-        savedAt: new Date().toISOString(),
-        reason: 'save_error',
-        errorMessage: msg,
-      });
-      setEmergencyBackup(getEmergencyDraft(projectId, candidate.id));
-      onSaveStateChange('error', msg);
+    });
+  }
+
+  const handleManualSave = async (createSnapshot = true) => {
+    const candidate = buildUpdatedEpisode();
+    if (!candidate) return;
+    try {
+      await saveExplicit(candidate, {
+        createRevision: createSnapshot,
+        revisionLabel: revisionLabelInput.trim() ||
+          `${candidate.status === 'confirmed' ? '확정' : '수동'} 저장 (${candidate.charCountWithSpaces}자)`,
+      }, () => setRevisionLabelInput(''));
+    } catch {
+      // The scoped save already reported the error and kept the local draft.
     }
   };
 
@@ -426,86 +476,65 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
   };
 
   const handleRecoverFromEmergency = async () => {
-    if (!emergencyBackup || !activeEpisode) return;
-    const restored = buildUpdatedEpisode({
-      title: emergencyBackup.title,
-      content: emergencyBackup.content,
-      synopsis: emergencyBackup.synopsis,
-      authorNote: emergencyBackup.authorNote,
-      status: emergencyBackup.status,
-    });
-    if (!restored) return;
-
-    onSaveStateChange('saving');
-    try {
-      const res = await onSaveEpisode(restored, {
-        createBackupRevisionFirst: true,
-        backupRevisionLabel: `비상 복구 전 안전 백업 (${calculateCharCounts(content).withSpaces.toLocaleString()}자)`,
-        createRevision: true,
-        revisionLabel: '비상 복구본에서 원고 복원',
-        expectedRevisionId: expectedRevisionIdRef.current,
-        expectedContentHash: expectedContentHashRef.current,
-      });
-      if (res?.episode) {
-        expectedRevisionIdRef.current = res.episode.latestRevisionId || '';
-        expectedContentHashRef.current =
-          res.episode.contentHash || computeManuscriptContentHash(res.episode.content);
-      } else {
-        expectedContentHashRef.current = computeManuscriptContentHash(restored.content);
-      }
-      setTitle(restored.title);
-      setContent(restored.content);
-      setSynopsis(restored.synopsis);
-      setAuthorNote(restored.authorNote);
-      setStatus(restored.status);
-      clearEmergencyDraft(projectId, activeEpisode.id);
-      setEmergencyBackup(null);
-      onSaveStateChange('recovered');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '비상 복구 저장 실패';
-      onSaveStateChange('error', msg);
+    const draft = emergencyBackup;
+    const session = saveSessionRef.current;
+    if (!draft || !session) return;
+    if (draft.baseRevisionId !== (session.baseline.latestRevisionId || '') ||
+        draft.baseContentHash !== (session.baseline.contentHash || computeManuscriptContentHash(session.baseline.content)) ||
+        draft.baseSavePayloadHash !== episodeSavePayloadHash(session.baseline)) {
+      setValidationError('원격 회차가 변경됐습니다. 복구본을 내려받아 최신 원고와 비교하세요.');
+      return;
     }
+    const restored = buildUpdatedEpisode(draft.episode);
+    if (!restored) return;
+    try {
+      await saveExplicit(restored, {
+        createBackupRevisionFirst: true, backupRevisionLabel: '비상 복구 전 안전 백업',
+        createRevision: true, revisionLabel: '비상 복구본에서 원고 복원',
+      }, () => {
+        setTitle(restored.title);
+        setContent(restored.content);
+        setSynopsis(restored.synopsis);
+        setAuthorNote(restored.authorNote);
+        setEpisodeNumber(restored.episodeNumber);
+        setStatus(restored.status);
+        setLinkedCharacterIds(restored.linkedCharacterIds);
+        setLinkedWorldbuildingIds(restored.linkedWorldbuildingIds);
+        void acknowledgeDraft(draft).catch(() => setLocalDraftStatus('복구 완료 · 로컬 사본을 정리하지 못했습니다.'));
+      }, true);
+    } catch {
+      // Keep the recovery copy if the save did not complete.
+    }
+  };
+
+  const downloadRecoveryDraft = () => {
+    const draft = emergencyBackup;
+    if (!draft) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(draft.episode, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `recovered-${draft.episode.id}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   const handleConfirmRestoreRevision = async () => {
     if (!restoreTargetRevision || !activeEpisode) return;
     const targetRev = restoreTargetRevision;
-
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-
-    const restoredEpisode = buildUpdatedEpisode({
-      content: targetRev.content,
-    });
+    const restoredEpisode = buildUpdatedEpisode({ content: targetRev.content });
     if (!restoredEpisode) return;
-
-    onSaveStateChange('saving');
     try {
-      const res = await onSaveEpisode(restoredEpisode, {
+      await saveExplicit(restoredEpisode, {
         createBackupRevisionFirst: true,
         backupRevisionLabel: `버전 복원 전 자동 백업 (${calculateCharCounts(content).withSpaces.toLocaleString()}자)`,
         createRevision: true,
         revisionLabel: `'${targetRev.label}' 버전으로 복원됨`,
-        expectedRevisionId: expectedRevisionIdRef.current,
-        expectedContentHash: expectedContentHashRef.current,
-      });
-      if (res?.episode) {
-        expectedRevisionIdRef.current = res.episode.latestRevisionId || '';
-        expectedContentHashRef.current =
-          res.episode.contentHash || computeManuscriptContentHash(res.episode.content);
-      } else {
-        expectedContentHashRef.current = computeManuscriptContentHash(restoredEpisode.content);
-      }
-      setRestoreTargetRevision(null);
-      setContent(targetRev.content);
-      clearEmergencyDraft(projectId, activeEpisode.id);
-      setEmergencyBackup(null);
-      onSaveStateChange('recovered');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '리비전 복원 저장 중 오류가 발생해 기존 원고를 유지합니다.';
-      onSaveStateChange('error', msg);
+      }, () => {
+        setRestoreTargetRevision(null);
+        setContent(targetRev.content);
+      }, true);
+    } catch {
+      // The server version and recovery copy remain available.
     }
   };
 
@@ -536,80 +565,23 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
   ): Promise<EpisodeRevisionCommitResult | void> => {
     if (!activeEpisode) return;
 
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-
-    const nextStatus: EpisodeStatus = options.markConfirmed ? 'confirmed' : status;
-    const nextSynopsis = options.updatedSynopsis ?? synopsis;
-
     const updatedCandidate = buildUpdatedEpisode({
       content: newContent,
-      status: nextStatus,
-      synopsis: nextSynopsis,
+      status: options.markConfirmed ? 'confirmed' : status,
+      synopsis: options.updatedSynopsis ?? synopsis,
     });
     if (!updatedCandidate) return;
-
-    onSaveStateChange('saving');
-
-    try {
-      const res = await onSaveEpisode(updatedCandidate, {
-        createBackupRevisionFirst:
-          options.createBackupRevisionFirst &&
-          content.trim().length > 0 &&
-          content !== newContent,
-        backupRevisionLabel: `AI 원고 반영 전 안전 백업 (${calculateCharCounts(
-          content
-        ).withSpaces.toLocaleString()}자)`,
-        createRevision: true,
-        revisionLabel: options.revisionLabel,
-        expectedRevisionId: expectedRevisionIdRef.current,
-        expectedContentHash: expectedContentHashRef.current,
-      });
-
-      // Strictly mutate editor UI state ONLY after atomic persistence succeeds
-      if (res?.episode) {
-        expectedRevisionIdRef.current = res.episode.latestRevisionId || '';
-        expectedContentHashRef.current =
-          res.episode.contentHash || computeManuscriptContentHash(res.episode.content);
-      } else {
-        expectedContentHashRef.current = computeManuscriptContentHash(newContent);
-      }
-
+    return saveExplicit(updatedCandidate, {
+      createBackupRevisionFirst: options.createBackupRevisionFirst && content.trim().length > 0 && content !== newContent,
+      backupRevisionLabel: `AI 원고 반영 전 안전 백업 (${calculateCharCounts(content).withSpaces.toLocaleString()}자)`,
+      createRevision: true,
+      revisionLabel: options.revisionLabel,
+    }, () => {
       setContent(newContent);
-      if (options.markConfirmed) {
-        setStatus('confirmed');
-      }
-      if (options.updatedSynopsis !== undefined) {
-        setSynopsis(nextSynopsis);
-      }
+      setStatus(updatedCandidate.status);
+      setSynopsis(updatedCandidate.synopsis);
       setEditorSelection(null);
-      clearEmergencyDraft(projectId, updatedCandidate.id);
-      setEmergencyBackup(null);
-      onSaveStateChange('saved');
-      return res;
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'AI 원고 반영 저장 중 오류가 발생하여 기존 원고와 대기 초안을 보존했습니다.';
-      saveEmergencyDraft({
-        projectId,
-        episodeId: activeEpisode.id,
-        title,
-        content,
-        synopsis,
-        authorNote,
-        status,
-        savedAt: new Date().toISOString(),
-        reason: 'save_error',
-        errorMessage: msg,
-      });
-      setEmergencyBackup(getEmergencyDraft(projectId, activeEpisode.id));
-      onSaveStateChange('error', msg);
-      throw err;
-    }
+    });
   };
 
   return (
@@ -759,11 +731,25 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
                   <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
                   <div className="text-xs leading-relaxed text-amber-200">
                     <div className="font-semibold text-amber-300">
-                      미저장 원고 복구본이 감지되었습니다 ({emergencyBackup.content.length.toLocaleString()}자)
+                      로컬 원고 복구본 {recoveryDrafts.length}개 ({emergencyBackup.episode.content.length.toLocaleString()}자)
                     </div>
                     <div>
-                      오류 또는 새로고침 직전 로컬 복구 버퍼에 보존된 원고입니다. 복구본을 불러와 안전하게 저장할 수 있습니다.
+                      오류 또는 새로고침 직전 로컬에 보존된 원고입니다.
                     </div>
+                    {recoveryDrafts.length > 1 && (
+                      <select
+                        aria-label="복구할 원고"
+                        className="mt-2 rounded-md bg-slate-900 px-2 py-1"
+                        value={emergencyBackup.writerId}
+                        onChange={(event) => setSelectedRecoveryWriter(event.target.value)}
+                      >
+                        {recoveryDrafts.map((draft) => (
+                          <option key={draft.writerId} value={draft.writerId}>
+                            {new Date(draft.savedAt).toLocaleString()} · {draft.episode.content.length.toLocaleString()}자
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -776,17 +762,16 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      clearEmergencyDraft(projectId, activeEpisode.id);
-                      setEmergencyBackup(null);
-                    }}
+                    onClick={downloadRecoveryDraft}
                     className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800 whitespace-nowrap"
                   >
-                    복구본 폐기
+                    복구본 다운로드
                   </button>
                 </div>
               </div>
             )}
+
+            {localDraftStatus && <p role="status" className="text-xs text-slate-300">{localDraftStatus}</p>}
 
             {validationError && (
               <div
@@ -950,7 +935,7 @@ export const ManuscriptView: React.FC<ManuscriptViewProps> = ({
                 existingPlans={writingPlans}
                 changeProposals={changeProposals}
                 currentEditorContent={content}
-                currentRevisionId={expectedRevisionIdRef.current}
+                currentRevisionId={saveSessionRef.current?.baseline.latestRevisionId ?? activeEpisode.latestRevisionId ?? ''}
                 editorSelection={editorSelection}
                 onApplyManuscriptToEditor={handleApplyAiManuscriptToEditor}
                 onSaveWritingPlan={onSaveWritingPlan}

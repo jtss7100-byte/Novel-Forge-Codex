@@ -52,6 +52,7 @@ import {
   EpisodeRevisionCasConflictError,
   executeAtomicEpisodeCasCommitCore,
   fetchFirestorePromptProfileById,
+  fetchFirestoreProjectDetails,
   persistApprovedStyleDnaAtomicallyFirestore,
   persistChangeProposalsIdempotentlyCore,
   persistFirestoreChangeProposalsIdempotently,
@@ -60,6 +61,7 @@ import {
   saveFirestoreCharacterVoicePrompt,
 } from '../services/novelRepository.ts';
 import { computeManuscriptContentHash } from '../utils/manuscriptIntegrity.ts';
+import { episodeSavePayloadHash } from '../utils/episodeSavePayload';
 import {
   buildLiteraryRewritePrompt,
   rebindProposalsToCommittedRevision,
@@ -3630,5 +3632,129 @@ test('Phase 4.4A Stage 2 — bounded narrative links through Firebase Auth, Fire
     setCustomGeminiEmbedContentForTesting(null);
     await first.db.recursiveDelete(first.db.doc(base));
     await Promise.all([owner.cleanup(), visitor.cleanup(), first.cleanup(), second.cleanup(), deleteClientApp(device)]);
+  }
+});
+
+test('Storage FS7, FS12, FS29, FS31: actual Firestore autosave conflicts, replay, size guards, and deletion', async () => {
+  const env = assertRulesEmulatorEnv();
+  const runId = `storage_${randomUUID().slice(0, 8)}`;
+  const email = `${runId}@novelforge.local`;
+  const password = 'StorageFixtureOnly#123';
+  const owner = await createAndSignInEmulatorUser({
+    ...env, roleLabel: 'storage_owner', email, password, appName: runId, adminAppName: `${runId}_auth`,
+  });
+  const second = initializeClientApp(owner.app.options, `${runId}_second`);
+  const admin = createIsolatedTestFirestoreClient({ ...env, runId });
+  const projectId = 'storage_fixture';
+  const base = `users/${owner.uid}/projects/${projectId}`;
+  const episodePath = `${base}/episodes/episode1`;
+  try {
+    const otherAuth = getClientAuth(second);
+    connectAuthEmulator(otherAuth, `http://${EXPECTED_AUTH_EMULATOR_HOST}`, { disableWarnings: true });
+    await signInWithEmailAndPassword(otherAuth, email, password);
+    const otherDb = getFirestore(second, env.databaseId);
+    connectFirestoreEmulator(otherDb, env.firestoreHostname, env.firestorePort);
+
+    const now = new Date();
+    const episode: Episode = {
+      id: 'episode1', ownerId: owner.uid, projectId, episodeNumber: 1, title: '합성 저장 원고',
+      content: '기준 원고', synopsis: '', authorNote: '', status: 'draft',
+      charCountWithSpaces: 5, charCountWithoutSpaces: 4, linkedCharacterIds: [], linkedWorldbuildingIds: [],
+      createdAt: now.toISOString(), updatedAt: now.toISOString(),
+    };
+    await admin.db.doc(base).set({
+      id: projectId, ownerId: owner.uid, title: 'Storage', genre: 'Fantasy',
+      synopsis: '', status: 'active', createdAt: now, updatedAt: now,
+    });
+    await admin.db.doc(episodePath).set({
+      ...episode, latestRevisionId: '', contentHash: computeManuscriptContentHash(episode.content),
+      createdAt: now, updatedAt: now,
+    });
+
+    const input = {
+      uid: owner.uid, projectId, expectedRevisionId: '', deduplicate: true,
+      expectedContentHash: computeManuscriptContentHash(episode.content),
+      expectedSavePayloadHash: episodeSavePayloadHash(episode),
+    };
+    const firstEdit = { ...episode, authorNote: '첫 번째 탭' };
+    const secondEdit = { ...episode, authorNote: '두 번째 탭' };
+    const edits = [firstEdit, secondEdit];
+    const responses = await Promise.allSettled([
+      commitEpisodeRevisionSafelyFirestore({ ...input, updatedEpisode: firstEdit }, owner.db),
+      commitEpisodeRevisionSafelyFirestore({ ...input, updatedEpisode: secondEdit }, otherDb),
+    ]);
+    const success = responses.findIndex((response) => response.status === 'fulfilled');
+    assert.notEqual(success, -1);
+    const losing = responses[1 - success];
+    assert.equal(losing.status, 'rejected');
+    assert.equal(losing.reason.code, 'SAVE_PAYLOAD_MISMATCH');
+    const winningEdit = edits[success];
+    const committed = await admin.db.doc(episodePath).get();
+    assert.equal(committed.data()?.authorNote, winningEdit.authorNote);
+    const originalUpdateTime = committed.updateTime;
+    const replay = await commitEpisodeRevisionSafelyFirestore({ ...input, updatedEpisode: winningEdit }, owner.db);
+    assert.equal(replay.unchanged, true);
+    assert.ok(originalUpdateTime?.isEqual((await admin.db.doc(episodePath).get()).updateTime!));
+    await assert.rejects(commitEpisodeRevisionSafelyFirestore({
+      ...input, expectedSavePayloadHash: episodeSavePayloadHash(winningEdit),
+      updatedEpisode: { ...winningEdit, content: '😀'.repeat(250000) },
+      createBackupRevisionFirst: true,
+      createRevision: true,
+    }, owner.db), { code: 'DOCUMENT_TOO_LARGE' });
+    assert.ok(originalUpdateTime?.isEqual((await admin.db.doc(episodePath).get()).updateTime!));
+    assert.equal((await admin.db.collection(`${base}/revisions`).get()).size, 0);
+    await admin.db.doc(episodePath).delete();
+    // The deployed rule also denies reads of missing episodes. Preserve that boundary.
+    await assert.rejects(commitEpisodeRevisionSafelyFirestore({ ...input, updatedEpisode: winningEdit }, owner.db),
+      { code: 'permission-denied' });
+    assert.equal((await admin.db.doc(episodePath).get()).exists, false);
+  } finally {
+    await admin.db.recursiveDelete(admin.db.doc(base));
+    await Promise.all([owner.cleanup(), admin.cleanup(), deleteClientApp(second)]);
+  }
+});
+
+test('Storage benchmark B: actual Firestore full project details at 100, 300, and 500 episodes', async () => {
+  const env = assertRulesEmulatorEnv();
+  const runId = `scale_${randomUUID().slice(0, 8)}`;
+  const owner = await createAndSignInEmulatorUser({
+    ...env, roleLabel: 'scale_owner', email: `${runId}@novelforge.local`, password: 'StorageFixtureOnly#123',
+    appName: runId, adminAppName: `${runId}_auth`,
+  });
+  const admin = createIsolatedTestFirestoreClient({ ...env, runId });
+  const projects: string[] = [];
+  try {
+    for (const count of [100, 300, 500]) {
+      const projectId = `bench_${count}`;
+      const base = `users/${owner.uid}/projects/${projectId}`;
+      projects.push(base);
+      const batches: number[] = [];
+      for (let start = 0; start < count; start += 400) {
+        const batch = admin.db.batch();
+        const end = Math.min(count, start + 400);
+        for (let index = start; index < end; index++) {
+          const id = `ep_${index + 1}`;
+          batch.set(admin.db.doc(`${base}/episodes/${id}`), {
+            id, ownerId: owner.uid, projectId, episodeNumber: index + 1,
+            title: `합성 회차 ${index + 1}`, content: '합성 원고입니다. '.repeat(30),
+            status: 'draft', linkedCharacterIds: [], linkedWorldbuildingIds: [],
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-01-01T00:00:00Z'),
+          });
+        }
+        await batch.commit();
+        batches.push(end - start);
+      }
+      let metrics: { requests: number; returnedDocuments: number } | undefined;
+      const details = await fetchFirestoreProjectDetails(owner.uid, projectId, owner.db, (value) => { metrics = value; });
+      assert.deepEqual(metrics, { requests: 4, returnedDocuments: count });
+      assert.equal(new Set(details.episodes.map((item) => item.id)).size, count);
+      assert.deepEqual(details.episodes.map((item) => item.episodeNumber), Array.from({ length: count }, (_, index) => index + 1));
+      console.log('[STORAGE_BENCHMARK_B]', JSON.stringify({
+        count, metrics, decodedEpisodeBytes: Buffer.byteLength(JSON.stringify(details.episodes)), fixtureBatches: batches,
+      }));
+    }
+  } finally {
+    for (const path of projects) await admin.db.recursiveDelete(admin.db.doc(path));
+    await Promise.all([owner.cleanup(), admin.cleanup()]);
   }
 });

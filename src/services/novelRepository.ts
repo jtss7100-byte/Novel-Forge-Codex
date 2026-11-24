@@ -76,6 +76,8 @@ import {
   isLegacyMasterWritingRulesPlaceholder,
 } from '../utils/aiEngineLogic';
 import { createInitialSeedBundle } from '../utils/seedData';
+import { assertFirestoreDocumentFits, FirestoreDocumentTooLargeError } from '../utils/firestoreDocumentSize';
+import { episodeSavePayloadHash, storedEpisodeSavePayloadHash } from '../utils/episodeSavePayload';
 
 export const LOCAL_BUNDLES_KEY = 'novelforge_local_bundles_v1';
 const EMERGENCY_PREFIX = 'novelforge_emergency_draft_';
@@ -151,18 +153,23 @@ export function listAllEmergencyDrafts(): EmergencyDraftBackup[] {
 // Local Persistent Store (Browser Persistence + Seed Initialization)
 // ============================================================================
 
-export function loadLocalBundles(ownerId = 'local_author'): ProjectBundle[] {
+const localBundleKey = (ownerId: string) => `${LOCAL_BUNDLES_KEY}:${ownerId}`;
+
+function readOwnedLocalBundles(storage: LocalStorageLike, ownerId: string): ProjectBundle[] | null {
+  const raw = storage.getItem(localBundleKey(ownerId)) ?? storage.getItem(LOCAL_BUNDLES_KEY);
+  if (!raw) return null;
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) return null;
+  return (parsed as ProjectBundle[]).filter((bundle) => bundle?.project?.ownerId === ownerId);
+}
+
+export function loadLocalBundles(ownerId = 'local_author', seedIfMissing = true): ProjectBundle[] {
   try {
-    const raw = localStorage.getItem(LOCAL_BUNDLES_KEY);
-    if (!raw) {
+    const parsed = readOwnedLocalBundles(localStorage, ownerId);
+    if (!parsed?.length) {
+      if (!seedIfMissing) return [];
       const initial = [createInitialSeedBundle(ownerId)];
-      localStorage.setItem(LOCAL_BUNDLES_KEY, JSON.stringify(initial));
-      return initial;
-    }
-    const parsed = JSON.parse(raw) as ProjectBundle[];
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      const initial = [createInitialSeedBundle(ownerId)];
-      localStorage.setItem(LOCAL_BUNDLES_KEY, JSON.stringify(initial));
+      localStorage.setItem(localBundleKey(ownerId), JSON.stringify(initial));
       return initial;
     }
     // Non-destructively ensure each existing project bundle has default prompt profiles if none exist yet,
@@ -213,12 +220,15 @@ export function loadLocalBundles(ownerId = 'local_author'): ProjectBundle[] {
     });
     return migrated;
   } catch {
-    return [createInitialSeedBundle(ownerId)];
+    return seedIfMissing ? [createInitialSeedBundle(ownerId)] : [];
   }
 }
 
-export function saveLocalBundles(bundles: ProjectBundle[]): void {
-  localStorage.setItem(LOCAL_BUNDLES_KEY, JSON.stringify(bundles));
+export function saveLocalBundles(bundles: ProjectBundle[], ownerId = bundles[0]?.project.ownerId ?? 'local_author'): void {
+  if (bundles.some((bundle) => bundle.project.ownerId !== ownerId)) {
+    throw new Error('[LOCAL_OWNER_MISMATCH] 다른 계정의 작품을 함께 저장할 수 없습니다.');
+  }
+  localStorage.setItem(localBundleKey(ownerId), JSON.stringify(bundles));
 }
 
 // ============================================================================
@@ -251,7 +261,9 @@ export async function fetchFirestoreProjects(uid: string): Promise<Project[]> {
 
 export async function fetchFirestoreProjectDetails(
   uid: string,
-  projectId: string
+  projectId: string,
+  firestoreDb: Firestore = db,
+  onRead?: (counts: { requests: number; returnedDocuments: number }) => void,
 ): Promise<{
   characters: Character[];
   worldbuilding: WorldbuildingItem[];
@@ -264,6 +276,13 @@ export async function fetchFirestoreProjectDetails(
   const wbPath = `${basePath}/worldbuilding`;
   const epPath = `${basePath}/episodes`;
   const revPath = `${basePath}/revisions`;
+  const counts = { requests: 0, returnedDocuments: 0 };
+  const readCollection = async (path: string) => {
+    counts.requests++;
+    const snapshot = await getDocs(query(collection(firestoreDb, path), where('ownerId', '==', uid)));
+    counts.returnedDocuments += snapshot.size;
+    return snapshot;
+  };
 
   let characters: Character[] = [];
   let worldbuilding: WorldbuildingItem[] = [];
@@ -271,7 +290,7 @@ export async function fetchFirestoreProjectDetails(
   let revisions: Revision[] = [];
 
   try {
-    const snap = await getDocs(query(collection(db, charPath), where('ownerId', '==', uid)));
+    const snap = await readCollection(charPath);
     characters = snap.docs.map((d) => {
       const data = d.data();
       return {
@@ -297,7 +316,7 @@ export async function fetchFirestoreProjectDetails(
   }
 
   try {
-    const snap = await getDocs(query(collection(db, wbPath), where('ownerId', '==', uid)));
+    const snap = await readCollection(wbPath);
     worldbuilding = snap.docs.map((d) => {
       const data = d.data();
       return {
@@ -321,7 +340,7 @@ export async function fetchFirestoreProjectDetails(
   }
 
   try {
-    const snap = await getDocs(query(collection(db, epPath), where('ownerId', '==', uid)));
+    const snap = await readCollection(epPath);
     episodes = snap.docs
       .map((d) => {
         const data = d.data();
@@ -360,7 +379,7 @@ export async function fetchFirestoreProjectDetails(
   }
 
   try {
-    const snap = await getDocs(query(collection(db, revPath), where('ownerId', '==', uid)));
+    const snap = await readCollection(revPath);
     revisions = snap.docs
       .map((d) => {
         const data = d.data();
@@ -381,6 +400,7 @@ export async function fetchFirestoreProjectDetails(
     handleFirestoreError(error, OperationType.LIST, revPath);
   }
 
+  onRead?.(counts);
   return { characters, worldbuilding, episodes, revisions };
 }
 
@@ -597,35 +617,59 @@ export async function deleteFirestoreWorldbuilding(
   }
 }
 
+function episodeWriteFields(episode: Episode) {
+  const counts = calculateCharCounts(episode.content);
+  return {
+    episodeNumber: episode.episodeNumber,
+    title: episode.title,
+    content: episode.content,
+    synopsis: episode.synopsis,
+    authorNote: episode.authorNote,
+    charCountWithSpaces: counts.withSpaces,
+    charCountWithoutSpaces: counts.withoutSpaces,
+    status: episode.status,
+    linkedCharacterIds: sanitizeIdArray(episode.linkedCharacterIds),
+    linkedWorldbuildingIds: sanitizeIdArray(episode.linkedWorldbuildingIds),
+    contentHash: computeManuscriptContentHash(episode.content),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function newEpisodeDocument(uid: string, projectId: string, episode: Episode) {
+  return {
+    id: episode.id,
+    ownerId: uid,
+    projectId,
+    ...episodeWriteFields(episode),
+    latestRevisionId: typeof episode.latestRevisionId === 'string' ? episode.latestRevisionId.trim() : '',
+    createdAt: serverTimestamp(),
+  };
+}
+
+function revisionDocument(uid: string, projectId: string, revision: Revision) {
+  return {
+    id: revision.id,
+    ownerId: uid,
+    projectId,
+    episodeId: revision.episodeId,
+    episodeTitle: revision.episodeTitle,
+    content: revision.content,
+    charCountWithSpaces: calculateCharCounts(revision.content).withSpaces,
+    label: revision.label,
+    createdAt: serverTimestamp(),
+  };
+}
+
 export async function createFirestoreEpisode(
   uid: string,
   projectId: string,
   episode: Episode
 ): Promise<void> {
   const path = `users/${uid}/projects/${projectId}/episodes/${episode.id}`;
-  const counts = calculateCharCounts(episode.content);
-  const contentHash = computeManuscriptContentHash(episode.content);
+  const payload = newEpisodeDocument(uid, projectId, episode);
+  assertFirestoreDocumentFits(path, payload);
   try {
-    await setDoc(doc(db, path), {
-      id: episode.id,
-      ownerId: uid,
-      projectId,
-      episodeNumber: episode.episodeNumber,
-      title: episode.title,
-      content: episode.content,
-      synopsis: episode.synopsis,
-      authorNote: episode.authorNote,
-      charCountWithSpaces: counts.withSpaces,
-      charCountWithoutSpaces: counts.withoutSpaces,
-      status: episode.status,
-      linkedCharacterIds: sanitizeIdArray(episode.linkedCharacterIds),
-      linkedWorldbuildingIds: sanitizeIdArray(episode.linkedWorldbuildingIds),
-      latestRevisionId:
-        typeof episode.latestRevisionId === 'string' ? episode.latestRevisionId.trim() : '',
-      contentHash,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    await setDoc(doc(db, path), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -637,28 +681,20 @@ export async function updateFirestoreEpisode(
   episode: Episode
 ): Promise<void> {
   const path = `users/${uid}/projects/${projectId}/episodes/${episode.id}`;
-  const counts = calculateCharCounts(episode.content);
-  const contentHash = computeManuscriptContentHash(episode.content);
   try {
-    const payload: Record<string, unknown> = {
-      episodeNumber: episode.episodeNumber,
-      title: episode.title,
-      content: episode.content,
-      synopsis: episode.synopsis,
-      authorNote: episode.authorNote,
-      charCountWithSpaces: counts.withSpaces,
-      charCountWithoutSpaces: counts.withoutSpaces,
-      status: episode.status,
-      linkedCharacterIds: sanitizeIdArray(episode.linkedCharacterIds),
-      linkedWorldbuildingIds: sanitizeIdArray(episode.linkedWorldbuildingIds),
-      contentHash,
-      updatedAt: serverTimestamp(),
-    };
+    const payload: Record<string, unknown> = episodeWriteFields(episode);
     if (typeof episode.latestRevisionId === 'string') {
       payload.latestRevisionId = episode.latestRevisionId.trim();
     }
-    await updateDoc(doc(db, path), payload);
+    await runTransaction(db, async (tx) => {
+      const ref = doc(db, path);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists()) throw new Error('[EPISODE_NOT_FOUND] 회차가 삭제되었습니다.');
+      assertFirestoreDocumentFits(path, { ...snapshot.data(), ...payload });
+      tx.update(ref, payload);
+    });
   } catch (error) {
+    if (error instanceof FirestoreDocumentTooLargeError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
@@ -666,6 +702,7 @@ export async function updateFirestoreEpisode(
 export type EpisodeRevisionCasConflictCode =
   | 'STALE_REVISION_CONFLICT'
   | 'CONTENT_HASH_MISMATCH'
+  | 'SAVE_PAYLOAD_MISMATCH'
   | 'EPISODE_NOT_FOUND';
 
 export class EpisodeRevisionCasConflictError extends Error {
@@ -701,6 +738,8 @@ export interface EpisodeRevisionCommitInput {
   updatedEpisode: Episode;
   expectedRevisionId?: string;
   expectedContentHash?: string;
+  expectedSavePayloadHash?: string;
+  deduplicate?: boolean;
   createBackupRevisionFirst?: boolean;
   backupRevisionLabel?: string;
   createRevision?: boolean;
@@ -712,6 +751,7 @@ export interface EpisodeRevisionCommitResult {
   episode: Episode;
   backupRevision: Revision | null;
   targetRevision: Revision | null;
+  unchanged?: boolean;
 }
 
 export interface AtomicEpisodeCasTxAdapter {
@@ -720,6 +760,7 @@ export interface AtomicEpisodeCasTxAdapter {
     content: string;
     latestRevisionId?: string;
     contentHash?: string;
+    savePayloadHash?: string;
   }>;
   createRevision: (revision: Revision) => Promise<void>;
   updateEpisode: (episode: Episode) => Promise<void>;
@@ -756,6 +797,26 @@ export async function executeAtomicEpisodeCasCommitCore(
     typeof remoteSnap.contentHash === 'string' && remoteSnap.contentHash.trim().length > 0
       ? remoteSnap.contentHash.trim()
       : computeManuscriptContentHash(remoteContent);
+
+  if (
+    input.deduplicate && !input.createRevision && !input.createBackupRevisionFirst &&
+    remoteSnap.savePayloadHash === episodeSavePayloadHash(input.updatedEpisode) &&
+    remoteContent === input.updatedEpisode.content &&
+    (input.updatedEpisode.latestRevisionId || '') === remoteRevisionId
+  ) {
+    return {
+      episode: { ...input.updatedEpisode, title: normalizedTitle, latestRevisionId: remoteRevisionId || undefined, contentHash: remoteContentHash },
+      backupRevision: null,
+      targetRevision: null,
+      unchanged: true,
+    };
+  }
+
+  if (input.expectedSavePayloadHash !== undefined && input.expectedSavePayloadHash !== remoteSnap.savePayloadHash) {
+    throw new EpisodeRevisionCasConflictError(
+      'SAVE_PAYLOAD_MISMATCH', '다른 탭 또는 기기가 회차 내용이나 메타데이터를 수정했습니다.'
+    );
+  }
 
   if (input.expectedRevisionId !== undefined) {
     const expectedRev = (input.expectedRevisionId || '').trim();
@@ -877,70 +938,38 @@ export async function commitEpisodeRevisionSafelyFirestore(
   firestoreDb: Firestore = db
 ): Promise<EpisodeRevisionCommitResult> {
   const epPath = `users/${input.uid}/projects/${input.projectId}/episodes/${input.updatedEpisode.id}`;
-  try {
-    return await runTransaction(firestoreDb, async (tx) => {
-      const epRef = doc(firestoreDb, epPath);
-      return executeAtomicEpisodeCasCommitCore(input, {
-        getEpisodeSnapshot: async () => {
-          const snap = await tx.get(epRef);
-          if (!snap.exists()) {
-            return { exists: false, content: '' };
-          }
-          const data = snap.data() || {};
-          return {
-            exists: true,
-            content: typeof data.content === 'string' ? data.content : '',
-            latestRevisionId:
-              typeof data.latestRevisionId === 'string' ? data.latestRevisionId : '',
-            contentHash:
-              typeof data.contentHash === 'string' ? data.contentHash : undefined,
-          };
-        },
-        createRevision: async (revision) => {
-          const revPath = `users/${input.uid}/projects/${input.projectId}/revisions/${revision.id}`;
-          const counts = calculateCharCounts(revision.content);
-          tx.set(doc(firestoreDb, revPath), {
-            id: revision.id,
-            ownerId: input.uid,
-            projectId: input.projectId,
-            episodeId: revision.episodeId,
-            episodeTitle: revision.episodeTitle,
-            content: revision.content,
-            charCountWithSpaces: counts.withSpaces,
-            label: revision.label,
-            createdAt: serverTimestamp(),
-          });
-        },
-        updateEpisode: async (committedEpisode) => {
-          const payload: Record<string, unknown> = {
-            episodeNumber: committedEpisode.episodeNumber,
-            title: committedEpisode.title,
-            content: committedEpisode.content,
-            synopsis: committedEpisode.synopsis,
-            authorNote: committedEpisode.authorNote,
-            charCountWithSpaces: committedEpisode.charCountWithSpaces,
-            charCountWithoutSpaces: committedEpisode.charCountWithoutSpaces,
-            status: committedEpisode.status,
-            linkedCharacterIds: sanitizeIdArray(committedEpisode.linkedCharacterIds),
-            linkedWorldbuildingIds: sanitizeIdArray(
-              committedEpisode.linkedWorldbuildingIds
-            ),
-            latestRevisionId: committedEpisode.latestRevisionId || '',
-            contentHash:
-              committedEpisode.contentHash ||
-              computeManuscriptContentHash(committedEpisode.content),
-            updatedAt: serverTimestamp(),
-          };
-          tx.update(epRef, payload);
-        },
-      });
+  return runTransaction(firestoreDb, async (tx) => {
+    const epRef = doc(firestoreDb, epPath);
+    const snap = await tx.get(epRef);
+    return executeAtomicEpisodeCasCommitCore(input, {
+      getEpisodeSnapshot: async () => {
+        if (!snap.exists()) return { exists: false, content: '' };
+        const data = snap.data();
+        return {
+          exists: true,
+          content: typeof data.content === 'string' ? data.content : '',
+          latestRevisionId: typeof data.latestRevisionId === 'string' ? data.latestRevisionId : '',
+          contentHash: typeof data.contentHash === 'string' ? data.contentHash : undefined,
+          savePayloadHash: input.deduplicate || input.expectedSavePayloadHash !== undefined
+            ? storedEpisodeSavePayloadHash(data) : undefined,
+        };
+      },
+      createRevision: async (revision) => {
+        const revPath = `users/${input.uid}/projects/${input.projectId}/revisions/${revision.id}`;
+        const payload = revisionDocument(input.uid, input.projectId, revision);
+        assertFirestoreDocumentFits(revPath, payload);
+        tx.set(doc(firestoreDb, revPath), payload);
+      },
+      updateEpisode: async (committedEpisode) => {
+        const payload = {
+          ...episodeWriteFields(committedEpisode),
+          latestRevisionId: committedEpisode.latestRevisionId || '',
+        };
+        assertFirestoreDocumentFits(epPath, { ...snap.data(), ...payload });
+        tx.update(epRef, payload);
+      },
     });
-  } catch (error) {
-    if (error instanceof EpisodeRevisionCasConflictError) {
-      throw error;
-    }
-    handleFirestoreError(error, OperationType.UPDATE, epPath);
-  }
+  });
 }
 
 export interface LocalStorageLike {
@@ -953,11 +982,25 @@ export interface LocalStorageLike {
  * (enforcing cross-tab stale detection when two tabs share `localStorage`) and rolls back cleanly
  * if `setItem` throws (e.g., QuotaExceededError).
  */
-export async function commitEpisodeRevisionSafelyLocal(params: {
+interface LocalEpisodeCommitInput {
   bundles: ProjectBundle[];
   commitInput: EpisodeRevisionCommitInput;
   storage?: LocalStorageLike | null;
-}): Promise<EpisodeRevisionCommitResult & { nextBundles: ProjectBundle[] }> {
+}
+
+export async function commitEpisodeRevisionSafelyLocal(
+  params: LocalEpisodeCommitInput,
+): Promise<EpisodeRevisionCommitResult & { nextBundles: ProjectBundle[] }> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (locks && params.storage === undefined) {
+    return locks.request(localBundleKey(params.commitInput.uid), () => commitLocalEpisode(params));
+  }
+  return commitLocalEpisode(params);
+}
+
+async function commitLocalEpisode(
+  params: LocalEpisodeCommitInput,
+): Promise<EpisodeRevisionCommitResult & { nextBundles: ProjectBundle[] }> {
   const storage =
     params.storage !== undefined
       ? params.storage
@@ -966,20 +1009,11 @@ export async function commitEpisodeRevisionSafelyLocal(params: {
       : null;
 
   // Prefer reading persisted localStorage first to catch concurrent multi-tab local edits
-  let workingBundles = params.bundles;
-  if (storage) {
-    try {
-      const persistedRaw = storage.getItem(LOCAL_BUNDLES_KEY);
-      if (persistedRaw) {
-        const parsed = JSON.parse(persistedRaw) as ProjectBundle[];
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          workingBundles = parsed;
-        }
-      }
-    } catch {
-      workingBundles = params.bundles;
-    }
-  }
+  const ownerId = params.commitInput.uid;
+  const persisted = storage ? readOwnedLocalBundles(storage, ownerId) : null;
+  const workingBundles = persisted?.length
+    ? persisted
+    : params.bundles.filter((bundle) => bundle.project.ownerId === ownerId);
 
   const targetBundleIdx = workingBundles.findIndex(
     (b) => b.project.id === params.commitInput.projectId
@@ -1011,6 +1045,7 @@ export async function commitEpisodeRevisionSafelyLocal(params: {
         contentHash:
           existingEpisode.contentHash ||
           computeManuscriptContentHash(existingEpisode.content),
+        savePayloadHash: episodeSavePayloadHash(existingEpisode),
       };
     },
     createRevision: async (revision) => {
@@ -1020,6 +1055,8 @@ export async function commitEpisodeRevisionSafelyLocal(params: {
       committedEpOut = committedEpisode;
     },
   });
+
+  if (result.unchanged) return { ...result, nextBundles: workingBundles };
 
   if (!committedEpOut) {
     throw new Error('[LOCAL_COMMIT_FAILED] Episode update payload was not produced.');
@@ -1041,7 +1078,8 @@ export async function commitEpisodeRevisionSafelyLocal(params: {
   });
 
   if (storage) {
-    storage.setItem(LOCAL_BUNDLES_KEY, JSON.stringify(nextBundles));
+    const key = params.storage === undefined ? localBundleKey(ownerId) : LOCAL_BUNDLES_KEY;
+    storage.setItem(key, JSON.stringify(nextBundles));
   }
 
   return {
@@ -1069,19 +1107,10 @@ export async function createFirestoreRevision(
   revision: Revision
 ): Promise<void> {
   const path = `users/${uid}/projects/${projectId}/revisions/${revision.id}`;
-  const counts = calculateCharCounts(revision.content);
+  const payload = revisionDocument(uid, projectId, revision);
+  assertFirestoreDocumentFits(path, payload);
   try {
-    await setDoc(doc(db, path), {
-      id: revision.id,
-      ownerId: uid,
-      projectId,
-      episodeId: revision.episodeId,
-      episodeTitle: revision.episodeTitle,
-      content: revision.content,
-      charCountWithSpaces: counts.withSpaces,
-      label: revision.label,
-      createdAt: serverTimestamp(),
-    });
+    await setDoc(doc(db, path), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -1113,6 +1142,14 @@ export async function uploadProjectBundleToFirestore(
     createdAt: bundle.project.createdAt || nowIso,
     updatedAt: nowIso,
   };
+
+  const basePath = `users/${uid}/projects/${projectId}`;
+  for (const episode of bundle.episodes) {
+    assertFirestoreDocumentFits(`${basePath}/episodes/${episode.id}`, newEpisodeDocument(uid, projectId, episode));
+  }
+  for (const revision of bundle.revisions) {
+    assertFirestoreDocumentFits(`${basePath}/revisions/${revision.id}`, revisionDocument(uid, projectId, revision));
+  }
 
   const existingProjects = await fetchFirestoreProjects(uid);
   const projectExists = existingProjects.some((p) => p.id === projectId);
@@ -4827,7 +4864,8 @@ export async function updateFirestoreWritingPlan(
 
 export async function fetchFirestorePhase2Collections(
   uid: string,
-  projectId: string
+  projectId: string,
+  options: { includeChangeProposals?: boolean } = {}
 ): Promise<{
   writingPromptProfiles: PromptProfile[];
   writingPlans: WritingPlan[];
@@ -4917,51 +4955,53 @@ export async function fetchFirestorePhase2Collections(
     handleFirestoreError(error, OperationType.LIST, `${basePath}/writingPlans`);
   }
 
-  try {
-    const snap = await getDocs(
-      query(collection(db, `${basePath}/changeProposals`), where('ownerId', '==', uid))
-    );
-    for (const d of snap.docs) {
-      const data = d.data();
-      changeProposals.push({
-        id: String(data.id ?? d.id),
-        ownerId: String(data.ownerId ?? uid),
-        projectId: String(data.projectId ?? projectId),
-        targetEntityType:
-          data.targetEntityType === 'WORLDBUILDING' ||
-          data.targetEntityType === 'EPISODE' ||
-          data.targetEntityType === 'SCENE' ||
-          data.targetEntityType === 'FORESHADOWING' ||
-          data.targetEntityType === 'RELATIONSHIP' ||
-          data.targetEntityType === 'TIMELINE_EVENT' ||
-          data.targetEntityType === 'STYLE_PROFILE'
-            ? data.targetEntityType
-            : 'CHARACTER',
-        targetEntityId: String(data.targetEntityId ?? ''),
-        proposedAction:
-          data.proposedAction === 'CREATE' || data.proposedAction === 'ARCHIVE'
-            ? data.proposedAction
-            : 'UPDATE',
-        title: String(data.title ?? ''),
-        rationale: String(data.rationale ?? ''),
-        beforeSummary: String(data.beforeSummary ?? ''),
-        afterSummary: String(data.afterSummary ?? ''),
-        proposedPayloadJson: String(data.proposedPayloadJson ?? '{}'),
-        canonStatus: normalizeToCanonStatus(data.canonStatus),
-        triggerEpisodeId: String(data.triggerEpisodeId ?? ''),
-        triggerSceneId: String(data.triggerSceneId ?? ''),
-        sourceRevisionId: String(data.sourceRevisionId ?? ''),
-        createdBy:
-          data.createdBy === 'AUTHOR' || data.createdBy === 'SYSTEM'
-            ? data.createdBy
-            : 'AI_ENGINE',
-        reviewedAt: String(data.reviewedAt ?? ''),
-        createdAt: toIsoString(data.createdAt),
-        updatedAt: toIsoString(data.updatedAt),
-      });
+  if (options.includeChangeProposals !== false) {
+    try {
+      const snap = await getDocs(
+        query(collection(db, `${basePath}/changeProposals`), where('ownerId', '==', uid))
+      );
+      for (const d of snap.docs) {
+        const data = d.data();
+        changeProposals.push({
+          id: String(data.id ?? d.id),
+          ownerId: String(data.ownerId ?? uid),
+          projectId: String(data.projectId ?? projectId),
+          targetEntityType:
+            data.targetEntityType === 'WORLDBUILDING' ||
+            data.targetEntityType === 'EPISODE' ||
+            data.targetEntityType === 'SCENE' ||
+            data.targetEntityType === 'FORESHADOWING' ||
+            data.targetEntityType === 'RELATIONSHIP' ||
+            data.targetEntityType === 'TIMELINE_EVENT' ||
+            data.targetEntityType === 'STYLE_PROFILE'
+              ? data.targetEntityType
+              : 'CHARACTER',
+          targetEntityId: String(data.targetEntityId ?? ''),
+          proposedAction:
+            data.proposedAction === 'CREATE' || data.proposedAction === 'ARCHIVE'
+              ? data.proposedAction
+              : 'UPDATE',
+          title: String(data.title ?? ''),
+          rationale: String(data.rationale ?? ''),
+          beforeSummary: String(data.beforeSummary ?? ''),
+          afterSummary: String(data.afterSummary ?? ''),
+          proposedPayloadJson: String(data.proposedPayloadJson ?? '{}'),
+          canonStatus: normalizeToCanonStatus(data.canonStatus),
+          triggerEpisodeId: String(data.triggerEpisodeId ?? ''),
+          triggerSceneId: String(data.triggerSceneId ?? ''),
+          sourceRevisionId: String(data.sourceRevisionId ?? ''),
+          createdBy:
+            data.createdBy === 'AUTHOR' || data.createdBy === 'SYSTEM'
+              ? data.createdBy
+              : 'AI_ENGINE',
+          reviewedAt: String(data.reviewedAt ?? ''),
+          createdAt: toIsoString(data.createdAt),
+          updatedAt: toIsoString(data.updatedAt),
+        });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, `${basePath}/changeProposals`);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, `${basePath}/changeProposals`);
   }
 
   const normalizedProfiles =
