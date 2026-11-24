@@ -1,3 +1,4 @@
+import type { GraphPath } from '../types/narrativeMemory';
 import { annotationEligibility } from './memoryKnowledgeLogic';
 import type { MemoryKnowledgeAnnotation } from '../types/memoryKnowledge';
 import type { ScenePlanItem, WritingContextBundle } from '../types/aiEngine';
@@ -112,7 +113,7 @@ export function verifySceneMemoryProvenance(params: {
   }, requireVerifiedLiveSource: true }).verifiedForWriting ? undefined : 'SOURCE_UNVERIFIED';
 }
 
-export interface SceneMemoryCandidate { hit: MemorySearchHit; source: VerifiedMemorySource }
+export interface SceneMemoryCandidate { hit: MemorySearchHit; source: VerifiedMemorySource; graphPath?: GraphPath; graphLinked?: boolean }
 
 export function temporalStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): MemoryTemporalStatus | 'SOURCE_UNVERIFIED' | 'FUTURE_INFORMATION' | 'TEMPORAL_EVIDENCE_MISSING' {
   if (source.knowledge?.timeless && source.episodeNumber === undefined && source.narrativeOrder === undefined &&
@@ -157,8 +158,8 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
   const rejected: { chunkId: string; reason: MemoryRejectionReason }[] = [];
   const reject = (chunkId: string, reason: MemoryRejectionReason) => rejected.push({ chunkId, reason });
   const goal = lexical(requirements.sceneGoal);
-  const evaluated: { hit: MemorySearchHit; selection: SceneMemorySelection; source: VerifiedMemorySource }[] = [];
-  for (const { hit, source } of candidates) {
+  const evaluated: { hit: MemorySearchHit; selection: SceneMemorySelection; source: VerifiedMemorySource; graphLinked?: boolean }[] = [];
+  for (const { hit, source, graphPath, graphLinked } of candidates) {
     const { chunk } = hit;
     const time = temporalStatus(requirements, source);
     if (time === 'SOURCE_UNVERIFIED' || time === 'FUTURE_INFORMATION' || time === 'TEMPORAL_EVIDENCE_MISSING') { reject(chunk.id, time); continue; }
@@ -174,13 +175,14 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
     const location = requirements.relevantLocations.some((name) => chunk.content.includes(name));
     const semantic = coefficient(hit.semanticScore), keyword = coefficient(hit.keywordScore), rank = coefficient(hit.score);
     const importance = coefficient(source.knowledge?.authorImportance ?? 0);
-    if (!castMatch && !exact && !clues && !goalMatch && !location && keyword === 0 && semantic < 0.2 && !importance) {
+    if (!castMatch && !exact && !clues && !goalMatch && !location && keyword === 0 && semantic < 0.2 && !importance && !graphPath) {
       reject(chunk.id, 'LOW_RELEVANCE'); continue;
     }
-    if (chunk.sourceEntityType === 'FORESHADOWING' && !open && !clues && !exact && !goalMatch) {
+    if (chunk.sourceEntityType === 'FORESHADOWING' && !open && !clues && !exact && !goalMatch && !graphPath) {
       reject(chunk.id, 'LOW_RELEVANCE'); continue;
     }
     const signals: MemoryRerankingSignal[] = ['FRESHNESS'];
+    if (graphPath) signals.push('GRAPH');
     if (semantic) signals.push('SEMANTIC');
     if (keyword) signals.push('KEYWORD');
     if (castMatch) signals.push('CHARACTER');
@@ -191,11 +193,12 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
     if (importance) signals.push('AUTHOR_IMPORTANCE');
     const score = 0.25 * rank + 0.17 * semantic + 0.17 * keyword + (castMatch ? 0.16 : 0) +
       (goalMatch || location ? 0.12 : 0) + (exact ? 0.75 : 0) + (clues ? 0.38 : 0) + (open && (clues || goalMatch) ? 0.20 : 0) +
-      (time === 'CURRENT_VALID_STATE' ? 0.12 : 0) + 0.31 * importance;
-    evaluated.push({ hit, source, selection: {
+      (graphPath ? (graphPath.depth === 1 ? 0.34 : 0.24) : 0) + (time === 'CURRENT_VALID_STATE' ? 0.12 : 0) + 0.31 * importance;
+    evaluated.push({ hit, source, graphLinked, selection: {
       chunkId: chunk.id, sourceEntityId: chunk.sourceEntityId, sourceRevisionId: chunk.sourceRevisionId,
       episodeNumber: source.episodeNumber, title: hit.document.title, temporal: time, knowledge, signals,
       annotationVersion: source.durableKnowledge?.version,
+      ...(graphPath ? { graphDepth: graphPath.depth, graphRelation: graphPath.via.at(-1)?.relation } : {}),
       score: Number(score.toFixed(5)), semanticScore: semantic, keywordScore: keyword, retrievalSource: hit.retrievalSource,
     } });
   }
@@ -217,7 +220,7 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
       return Math.min(prior.sourceEndOffset ?? 0, chunk.sourceEndOffset ?? 0) > Math.max(prior.sourceStartOffset ?? 0, chunk.sourceStartOffset ?? 0);
     });
     if (duplicate) { reject(chunk.id, 'DUPLICATE_EVIDENCE'); continue; }
-    const size = chunk.content.length + next.hit.document.title.length + 192;
+    const size = chunk.content.length + next.hit.document.title.length + 192 + (next.graphLinked ? 300 : 0);
     if (selected.length >= budget.maxSelectedChunks || memoryChars + chunk.content.length > budget.maxMemoryChars ||
         estimate(estimatedContextChars + size) > budget.maxEstimatedMemoryTokens) { reject(chunk.id, 'BUDGET_EXCEEDED'); continue; }
     if (selected.length && !selected.some(({ hit }) => hit.chunk.sourceEntityType === chunk.sourceEntityType)) next.selection.signals.push('SOURCE_DIVERSITY');

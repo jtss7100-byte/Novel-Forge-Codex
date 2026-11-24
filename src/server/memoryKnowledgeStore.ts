@@ -98,7 +98,7 @@ export function memoryKnowledgeSource(chunk: MemoryChunk, document: MemoryDocume
   };
 }
 
-async function assertOwned(db: Firestore, ownerId: string, projectId: string, tx?: Transaction) {
+export async function assertMemoryProjectOwner(db: Firestore, ownerId: string, projectId: string, tx?: Transaction) {
   if (!id.safeParse(ownerId).success || !id.safeParse(projectId).success || ownerId === 'local_author') throw new MemoryKnowledgeError('FORBIDDEN');
   const ref = db.doc(`users/${ownerId}/projects/${projectId}`);
   const row = (await (tx ? tx.get(ref) : ref.get())).data();
@@ -121,7 +121,7 @@ async function inspectAnnotation(row: MemoryKnowledgeAnnotation, ref: MemoryKnow
 }
 
 export async function applyWriterMemoryKnowledge(db: Firestore, reader: ReturnType<typeof makeSourceReader>,
-  ownerId: string, projectId: string, candidates: SceneMemoryCandidate[], target: SceneMemoryRequirements) {
+  ownerId: string, projectId: string, candidates: SceneMemoryCandidate[], target: SceneMemoryRequirements, beforeRead?: () => void) {
   const slots = candidates.map(({ hit, source }) => {
     const ref = memoryKnowledgeSource(hit.chunk, hit.document, source);
     return ref && { ref, id: memoryAnnotationId(ref) };
@@ -129,6 +129,7 @@ export async function applyWriterMemoryKnowledge(db: Firestore, reader: ReturnTy
   const ids = [...new Set(slots.flatMap((slot) => slot ? [slot.id] : []))];
   if (!ids.length) return;
   const collection = annotations(db, reader.base);
+  beforeRead?.();
   const snapshots = await db.getAll(...ids.map((key) => collection.doc(key)));
   const byId = new Map(snapshots.filter((snap) => snap.exists).map((snap) => [snap.id, snap.data()]));
   for (const [i, { source }] of candidates.entries()) {
@@ -155,7 +156,7 @@ export async function applyWriterMemoryKnowledge(db: Firestore, reader: ReturnTy
   }
 }
 
-async function verifyIndexedChunk(ownerId: string, projectId: string, chunk: MemoryChunk, document: MemoryDocument | undefined,
+export async function verifyAuthoritativeIndexedChunk(ownerId: string, projectId: string, chunk: MemoryChunk, document: MemoryDocument | undefined,
   manifest: FirestoreRagManifestDoc | undefined, reader: ReturnType<typeof makeSourceReader>, sources: Map<string, Promise<VerifiedMemorySource | undefined>>) {
   const key = `${chunk.sourceEntityType}:${chunk.sourceEntityId}`;
   const pending = sources.get(key) ?? buildVerifiedSource(chunk, reader, ownerId, projectId).catch(() => undefined);
@@ -170,7 +171,7 @@ async function saveOne(db: Firestore, ownerId: string, projectId: string, comman
   const annotationId = memoryAnnotationId(command.source);
   const fingerprint = knowledgeHash(JSON.stringify(command));
   return db.runTransaction(async (tx) => {
-    const project = await assertOwned(db, ownerId, projectId, tx);
+    const project = await assertMemoryProjectOwner(db, ownerId, projectId, tx);
     const receipt = project.collection('memoryKnowledgeDecisions').doc(command.operationId);
     const receiptSnapshot = await tx.get(receipt);
     if (receiptSnapshot.exists) {
@@ -189,7 +190,7 @@ async function saveOne(db: Firestore, ownerId: string, projectId: string, comman
     const current = currentSnapshot.exists ? scopedAnnotation(currentSnapshot.data(), annotationId, ownerId, projectId) : null;
     if ((current?.version ?? 0) !== command.expectedVersion) throw new MemoryKnowledgeError('VERSION_CONFLICT');
     const reader = makeSourceReader(db, ownerId, projectId, tx);
-    const verification = await verifyIndexedChunk(ownerId, projectId, chunk, document.data() as MemoryDocument | undefined,
+    const verification = await verifyAuthoritativeIndexedChunk(ownerId, projectId, chunk, document.data() as MemoryDocument | undefined,
       manifest.data() as FirestoreRagManifestDoc | undefined, reader, new Map());
     if (!verification.ref || !verification.source) {
       throw new MemoryKnowledgeError(verification.failure === 'STALE_SOURCE' ? 'STALE_SOURCE' : 'SOURCE_UNVERIFIED');
@@ -225,7 +226,7 @@ export async function saveMemoryKnowledge(db: Firestore, ownerId: string, input:
   const request = memoryKnowledgeWriteSchema.safeParse(input);
   if (!request.success) throw new MemoryKnowledgeError('BAD_REQUEST');
   const { projectId, commands } = request.data;
-  await assertOwned(db, ownerId, projectId);
+  await assertMemoryProjectOwner(db, ownerId, projectId);
   const results: MemoryKnowledgeWriteResult[] = [];
   for (const command of commands) {
     try {
@@ -293,7 +294,7 @@ async function reviewRows(db: Firestore, ownerId: string, projectId: string, chu
   documents: Map<string, MemoryDocument>, manifest: FirestoreRagManifestDoc | undefined, reader: ReturnType<typeof makeSourceReader>,
   target?: SceneMemoryRequirements, summary = false): Promise<MemoryKnowledgeRow[]> {
   const sources = new Map<string, Promise<VerifiedMemorySource | undefined>>();
-  const checked = await Promise.all(chunks.map((chunk) => verifyIndexedChunk(ownerId, projectId, chunk, documents.get(chunk.documentId), manifest, reader, sources)));
+  const checked = await Promise.all(chunks.map((chunk) => verifyAuthoritativeIndexedChunk(ownerId, projectId, chunk, documents.get(chunk.documentId), manifest, reader, sources)));
   const keys = chunks.map((chunk) => chunk.sourceStartOffset === undefined || chunk.sourceEndOffset === undefined ? undefined : memoryAnnotationId({
     sourceEntityType: chunk.sourceEntityType, sourceEntityId: chunk.sourceEntityId,
     sourceStartOffset: chunk.sourceStartOffset, sourceEndOffset: chunk.sourceEndOffset,
@@ -357,7 +358,7 @@ async function reviewRows(db: Firestore, ownerId: string, projectId: string, chu
 }
 
 export async function listMemoryKnowledge(db: Firestore, ownerId: string, query: z.infer<typeof memoryKnowledgeListSchema>): Promise<MemoryKnowledgePage> {
-  const project = await assertOwned(db, ownerId, query.projectId);
+  const project = await assertMemoryProjectOwner(db, ownerId, query.projectId);
   const reader = makeSourceReader(db, ownerId, query.projectId);
   const chunkCollection = project.collection('memoryChunks');
   let cursor = query.documentId ? chunkCollection.where('documentId', '==', query.documentId) :
@@ -396,7 +397,7 @@ export async function listMemoryKnowledge(db: Firestore, ownerId: string, query:
 }
 
 export async function summarizeMemoryKnowledge(db: Firestore, ownerId: string, query: z.infer<typeof memoryKnowledgeSummarySchema>): Promise<MemoryKnowledgePage> {
-  const project = await assertOwned(db, ownerId, query.projectId);
+  const project = await assertMemoryProjectOwner(db, ownerId, query.projectId);
   const reader = makeSourceReader(db, ownerId, query.projectId);
   let cursor = project.collection('memoryDocuments').orderBy(FieldPath.documentId());
   if (query.after) cursor = cursor.startAfter(query.after);
@@ -421,7 +422,7 @@ export async function summarizeMemoryKnowledge(db: Firestore, ownerId: string, q
 }
 
 export async function listMemoryKnowledgeHistory(db: Firestore, ownerId: string, query: z.infer<typeof memoryKnowledgeHistorySchema>) {
-  const project = await assertOwned(db, ownerId, query.projectId);
+  const project = await assertMemoryProjectOwner(db, ownerId, query.projectId);
   let cursor = project.collection('memoryKnowledgeDecisions').where('annotationId', '==', query.annotationId).orderBy(FieldPath.documentId());
   if (query.after) cursor = cursor.startAfter(query.after);
   const page = await cursor.limit(21).get();
@@ -455,7 +456,7 @@ async function hasActiveApprovalRange(project: DocumentReference, row: MemoryKno
 }
 
 export async function listMemoryKnowledgeApprovals(db: Firestore, ownerId: string, query: z.infer<typeof memoryKnowledgeSummarySchema>) {
-  const project = await assertOwned(db, ownerId, query.projectId);
+  const project = await assertMemoryProjectOwner(db, ownerId, query.projectId);
   const reader = makeSourceReader(db, ownerId, query.projectId);
   let cursor = annotations(db, project.path).orderBy(FieldPath.documentId());
   if (query.after) cursor = cursor.startAfter(query.after);

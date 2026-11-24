@@ -966,6 +966,12 @@ service cloud.firestore {
       }
 
       // Writer knowledge approvals and receipts are owned by the authenticated server API.
+      match /narrativeMemoryLinks/{linkId} {
+        allow read, write: if false;
+      }
+      match /narrativeMemoryDecisions/{operationId} {
+        allow read, write: if false;
+      }
       match /memoryKnowledgeAnnotations/{annotationId} {
         allow read, write: if false;
       }

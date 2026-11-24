@@ -1,3 +1,4 @@
+import type { NarrativeNode } from './types/narrativeMemory';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   onAuthStateChanged,
@@ -188,6 +189,7 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(false);
 
+  const [narrativeFocus, setNarrativeFocus] = useState<{ projectId: string; node: NarrativeNode }>();
   const [idTokenState, setIdTokenState] = useState<string | null>(null);
 
   const getIdToken = useCallback(async (): Promise<string | null> => {
@@ -3192,6 +3194,7 @@ export default function App() {
 
           {activeTab === 'memory_search' && activeProject && (
             <MemorySearchView
+              narrativeFocus={narrativeFocus?.projectId === activeProject.id ? narrativeFocus.node : undefined}
               ownerId={currentUser?.uid || activeProject.ownerId || 'local_author'}
               idToken={idTokenState}
               activeProject={activeProject}
@@ -3280,6 +3283,7 @@ export default function App() {
               onDeleteTimelineEvent={handleDeleteTimelineEvent}
               onNavigateToEpisode={(epId) => handleNavigate('manuscript', epId)}
               onNavigateToForeshadowing={() => handleNavigate('foreshadowing')}
+              onOpenNarrative={idTokenState ? (id) => { setNarrativeFocus({ projectId: activeProject.id, node: { type: 'TIMELINE_EVENT', id } }); handleNavigate('memory_search'); } : undefined}
             />
           )}
 
@@ -3300,6 +3304,7 @@ export default function App() {
               onNavigateToEpisode={(epId) => handleNavigate('manuscript', epId)}
               onNavigateToTimeline={() => handleNavigate('timeline')}
               onNavigateToCharacters={() => handleNavigate('characters')}
+              onOpenNarrative={idTokenState ? (id) => { setNarrativeFocus({ projectId: activeProject.id, node: { type: 'FORESHADOWING', id } }); handleNavigate('memory_search'); } : undefined}
             />
           )}
 

@@ -1,9 +1,13 @@
+import type { DocumentReference } from 'firebase-admin/firestore';
+import { GRAPH_LIMITS } from '../utils/narrativeMemoryLogic';
+import { listNarrativeDecisions, listNarrativeLinks, narrativeCommandSchema, previewNarrativeLinks, saveNarrativeLink } from '../server/narrativeMemoryStore';
+import type { NarrativeLinkCommand, NarrativeNode } from '../types/narrativeMemory';
 
 import { createSceneMemoryRetriever } from '../server/sceneMemoryRetrieval';
 import { listMemoryKnowledge, listMemoryKnowledgeApprovals, listMemoryKnowledgeHistory, saveMemoryKnowledge, summarizeMemoryKnowledge } from '../server/memoryKnowledgeStore';
 import { indexMemoryInputOnServer, setCustomGeminiEmbedContentForTesting, type FirestoreRagManifestDoc } from '../server/ragEngine';
 import { computeDeterministicSemanticEmbedding, extractProjectMemoryIndexInputs } from '../services/memorySearchProvider';
-import type { Episode, Scene, TimelineEvent, WorldbuildingItem } from '../types/novel';
+import type { CharacterRelationship, Episode, Foreshadowing, Scene, TimelineEvent, WorldbuildingItem } from '../types/novel';
 import type { MemoryKnowledgeCommand, MemoryKnowledgeRow } from '../types/memoryKnowledge';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -3355,6 +3359,272 @@ test('Phase 4.4A Stage 1.1 — verified knowledge through real Firebase Auth and
       assert.equal(checked.status, 'ANNOTATED');
       assert.equal(checked.writerEligible, false);
       assert.equal(checked.reason, 'TEMPORAL_EVIDENCE_MISSING');
+    });
+  } finally {
+    setCustomGeminiEmbedContentForTesting(null);
+    await first.db.recursiveDelete(first.db.doc(base));
+    await Promise.all([owner.cleanup(), visitor.cleanup(), first.cleanup(), second.cleanup(), deleteClientApp(device)]);
+  }
+});
+
+test('Phase 4.4A Stage 2 — bounded narrative links through Firebase Auth, Firestore and Writer', async (t) => {
+  const env = assertRulesEmulatorEnv();
+  const run = 'nm_' + Date.now();
+  const email = (role: string) => `${run}-${role}@novelforge.local`;
+  const password = 'NarrativeEmulator#397';
+  const user = (roleLabel: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel, password, email: email(roleLabel), appName: `client_${roleLabel}_${run}`, adminAppName: `admin_${roleLabel}_${run}`,
+  });
+  const owner = await user('owner');
+  const visitor = await user('visitor');
+  const first = createIsolatedTestFirestoreClient({ ...env, runId: run });
+  const second = createIsolatedTestFirestoreClient({ ...env, runId: run + '_restored' });
+  const device = initializeClientApp(owner.app.options, run + '_device_two');
+  const projectId = 'narrative';
+  const scope = { ownerId: owner.uid, projectId };
+  const base = `users/${owner.uid}/projects/${projectId}`;
+  const clock = '2026-01-01T00:00:00.000Z';
+  const draft: Episode = { ...scope, id: 'target', episodeNumber: 300, title: '은무늬 문턱', synopsis: '', authorNote: '',
+    charCountWithSpaces: 0, charCountWithoutSpaces: 0, status: 'draft', canonStatus: 'DRAFT', content: '보존할 현재 원고',
+    latestRevisionId: 'rev_target', linkedCharacterIds: ['seorin'], linkedWorldbuildingIds: [], createdAt: clock, updatedAt: clock };
+  function chapter(id: string, number: number): Episode {
+    return { ...draft, id, episodeNumber: number, title: id, content: '검증에 쓰는 확정 원고 ' + id,
+      latestRevisionId: 'rev_' + id, status: 'confirmed', canonStatus: 'CANON' };
+  }
+  function event(id: string, chapter: Episode, title: string, summary: string, order: number): TimelineEvent {
+    return { ...scope, id, title, summary, inUniverseDate: '', chronologicalOrder: order, episodeId: chapter.id, sceneId: '',
+      participantCharacterIds: ['seorin'], linkedForeshadowingIds: [], linkedWorldbuildingIds: [], canonStatus: 'CANON',
+      sourceRevisionId: chapter.latestRevisionId!, createdBy: 'AUTHOR', memoryKnowledge: { scope: 'PUBLIC' }, createdAt: clock, updatedAt: clock };
+  }
+  const ep10 = chapter('first', 10), ep35 = chapter('second', 35), ep72 = chapter('third', 72);
+  const ep120 = chapter('later', 120), ep400 = chapter('future', 400);
+  const meeting = event('meeting', ep10, '은무늬 문턱', '은무늬 문턱 앞에 섰다.', 10);
+  const betrayal = event('betrayal', ep35, '자리의 공석', '장부의 서명으로 조약이 폐기됐다.', 35);
+  const secret = { ...event('secret', ep72, '거래의 내막', '서린이 모르는 진실을 숨겼다.', 72), memoryKnowledge: { scope: 'AUTHOR_ONLY' as const } };
+  const recovery = event('recovery', ep120, '신체 회복', '손을 완전히 회복했다.', 120);
+  const future = event('future_event', ep400, '먼 훗날', '말년의 귀환은 아직 모른다.', 400);
+  const actors = ['seorin'];
+  const fixture = buildEvaluationFixture('NW8', 'offline-writer');
+  const scenePlan = { ...fixture.plan.scenes[0], sceneNumber: 1, title: meeting.title, purpose: '은무늬 문턱', mustIncludeEvent: '은무늬 문턱',
+    characterIds: actors, pointOfViewCharacterId: actors[0], memory: { requiredEventIds: [meeting.id] } };
+  const plan = { ...fixture.plan, ...scope, id: 'approved_graph', episodeId: draft.id, requiredEvents: [], forbiddenDevelopments: [], scenes: [scenePlan] };
+  const context = { ...fixture.context, ...scope, episodeId: draft.id, previousEpisodeSummary: '', canonCharacters: [], sceneCharacterIds: actors,
+    requiredEvents: [], forbiddenDevelopments: [], plotOutline: '은무늬 문턱', episodeTitle: meeting.title };
+  const retrieval = { ...scope, db: first.db, context, plan, budget: { maxEmbeddingRequests: 0 } };
+  const asNode = (id: string): NarrativeNode => ({ type: 'TIMELINE_EVENT', id });
+  const query = (db = first.db) => listNarrativeLinks(db, owner.uid, { projectId });
+  const confirm = (command: NarrativeLinkCommand, db = first.db) => saveNarrativeLink(db, owner.uid, narrativeCommandSchema.parse(command));
+
+  try {
+    const auth = getClientAuth(device);
+    connectAuthEmulator(auth, `http://${env.authHost}`, { disableWarnings: true });
+    const signed = (await signInWithEmailAndPassword(auth, email('owner'), password)).user;
+    const [sessionOne, sessionTwo] = await Promise.all([
+      getAdminAuth(first.app).verifyIdToken(await getClientAuth(owner.app).currentUser!.getIdToken()),
+      getAdminAuth(second.app).verifyIdToken(await signed.getIdToken()),
+    ]);
+    assert.equal(sessionOne.uid, owner.uid);
+    assert.equal(sessionTwo.uid, owner.uid);
+    const chapters = [draft, ep10, ep35, ep72, ep120, ep400];
+    const savedEvents = [meeting, betrayal, secret, recovery, future];
+    const batch = first.db.batch();
+    batch.set(first.db.doc(base), { id: projectId, ownerId: owner.uid, lifecycleStatus: 'ACTIVE' });
+    batch.set(first.db.doc(`${base}/characters/seorin`), { ...scope, id: 'seorin', name: '서린', canonStatus: 'CANON' });
+    batch.set(first.db.doc(`${base}/writingPlans/${plan.id}`), plan);
+    for (const row of chapters) {
+      batch.set(first.db.doc(`${base}/episodes/${row.id}`), row);
+      batch.set(first.db.doc(`${base}/revisions/${row.latestRevisionId}`), { ...scope, id: row.latestRevisionId, episodeId: row.id, content: row.content });
+    }
+    for (const row of savedEvents) batch.set(first.db.doc(`${base}/timelineEvents/${row.id}`), row);
+    await batch.commit();
+    setCustomGeminiEmbedContentForTesting(async ({ contents }) => ({ embeddings: [{ values: computeDeterministicSemanticEmbedding(contents, 768) }] }));
+    for (const input of extractProjectMemoryIndexInputs({ ...scope, characters: [], worldbuilding: [], episodes: chapters, timelineEvents: savedEvents, includeDrafts: false })
+      .filter(({ sourceEntityType }) => sourceEntityType === 'TIMELINE_EVENT')) {
+      await indexMemoryInputOnServer(input, { db: first.db, cacheNamespace: run,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+    }
+    setCustomGeminiEmbedContentForTesting(null);
+    const watched = [first.db.doc(`${base}/episodes/target`), first.db.doc(`${base}/timelineEvents/meeting`), first.db.doc(`${base}/ragManifest/control`)];
+    const original = (await first.db.getAll(...watched)).map((doc) => doc.data());
+    const rows = (await listMemoryKnowledge(first.db, owner.uid, { projectId })).rows;
+    const command = (from: string, to: string, changes: Partial<NarrativeLinkCommand> = {}): NarrativeLinkCommand => {
+      const locators = [from, to].map((id) => rows.find((row) => row.sourceEntityId === id));
+      assert.ok(locators[0]?.source && locators[1]?.source, JSON.stringify(rows));
+      return { projectId, confirmed: true, from: asNode(from), to: asNode(to), relation: 'CAUSES', visibility: 'SOURCE_KNOWLEDGE',
+        evidence: [{ chunkId: locators[0].chunkId, source: locators[0].source }, { chunkId: locators[1].chunkId, source: locators[1].source }],
+        status: 'AUTHOR_CONFIRMED', operationId: randomUUID(), expectedVersion: 0, ...changes };
+    };
+    const initial = command('meeting', 'betrayal', { status: 'CANDIDATE' });
+    let linkId = '';
+
+    await t.test('NM21–NM23, NM28: candidates wait for approval; receipts and CAS survive two authenticated devices', async () => {
+      const stored = await confirm(initial);
+      linkId = stored.id;
+      assert.equal(stored.status, 'CANDIDATE');
+      const draftResult = await createSceneMemoryRetriever(retrieval)(scenePlan);
+      assert.ok(!draftResult.evidence.some((row) => row.sourceEntityId === betrayal.id));
+      const pending = { ...initial, expectedVersion: 1, status: 'AUTHOR_CONFIRMED' as const, operationId: randomUUID() };
+      const alternate = { ...pending, operationId: randomUUID() };
+      const settled = await Promise.allSettled([confirm(pending), confirm(alternate, second.db)]);
+      const winner = settled[0].status === 'fulfilled' ? pending : alternate;
+      assert.equal(settled.filter((item) => item.status === 'fulfilled').length, 1, JSON.stringify(settled));
+      assert.ok(settled.some((item) => item.status === 'rejected' && item.reason.code === 'VERSION_CONFLICT'));
+      const replay = await confirm(winner, second.db);
+      assert.equal(replay.version, 2);
+      assert.equal(replay.operationId, winner.operationId);
+      await assert.rejects(confirm({ ...winner, visibility: 'AUTHOR_ONLY' }), { code: 'OPERATION_CONFLICT' });
+      assert.equal((await listNarrativeLinks(second.db, sessionTwo.uid, { projectId, nodeType: 'TIMELINE_EVENT', nodeId: meeting.id })).entries[0]?.status, 'AUTHOR_CONFIRMED');
+      const history = await listNarrativeDecisions(second.db, sessionTwo.uid, { projectId, linkId });
+      assert.equal(history.entries.find((row) => row.record.version === 2)?.previous?.status, 'CANDIDATE');
+      await assert.rejects(listNarrativeLinks(first.db, visitor.uid, { projectId }), { code: 'FORBIDDEN' });
+      await assert.rejects(listNarrativeLinks(first.db, owner.uid, { projectId: 'other_project' }), { code: 'FORBIDDEN' });
+      const client = connectClientFirestoreDb({ app: device, ...env });
+      await assertPermissionDenied(() => getDoc(doc(client, `${base}/narrativeMemoryLinks/${linkId}`)), 'Direct narrative-link read');
+      await assertPermissionDenied(() => setDoc(doc(owner.db, `${base}/narrativeMemoryLinks/${linkId}`), { status: 'AUTHOR_CONFIRMED' }), 'Direct approval forgery');
+      await assertPermissionDenied(() => setDoc(doc(owner.db, `${base}/narrativeMemoryDecisions/fake`), { status: 'AUTHOR_CONFIRMED' }), 'Direct receipt forgery');
+      await assert.rejects(confirm(command('betrayal', 'meeting')), { code: 'CAUSAL_EVIDENCE_MISSING' });
+    });
+
+    await t.test('NM1, NM3, NM12–NM14, NM19 and NM25: exact server search expands only authorized causal evidence', async () => {
+      await confirm(command('meeting', 'secret', { relation: 'RELATED_TO' }));
+      await confirm(command('meeting', 'future_event', { relation: 'RELATED_TO' }));
+      await confirm(command('secret', 'recovery', { relation: 'RELATED_TO' }));
+      const baseline = await createSceneMemoryRetriever({ ...retrieval, graph: false })(scenePlan);
+      const retriever = createSceneMemoryRetriever(retrieval);
+      const actual = await retriever(scenePlan);
+      assert.ok(!baseline.evidence.some((row) => row.sourceEntityId === betrayal.id), JSON.stringify(baseline.diagnostics));
+      assert.ok(actual.evidence.some((row) => row.sourceEntityId === betrayal.id), JSON.stringify(actual.diagnostics));
+      assert.ok(actual.evidence.every((row) => ![secret.id, future.id, recovery.id].includes(row.sourceEntityId)));
+      assert.ok(actual.diagnostics.graph?.rejected.POV_KNOWLEDGE_RESTRICTED);
+      assert.ok(actual.diagnostics.graph?.rejected.FUTURE_EVENT);
+      assert.equal(actual.diagnostics.graph?.causalLinks, 1);
+      const draftPrompt = assembleNovelWriterPromptInOrder({ context: { ...context, retrievedMemoryChunks: actual.evidence }, scenePlan, totalScenesInPlan: 1 });
+      assert.ok(draftPrompt.orderedPrompt.includes(betrayal.summary));
+      assert.match(draftPrompt.orderedPrompt, /작가 승인 서사 연결.+CAUSES/);
+      assert.ok(!draftPrompt.orderedPrompt.includes(secret.summary));
+      for (let i = 0; i < 4; i++) {
+        const result = await retriever(scenePlan);
+        assert.ok(result.diagnostics.retrievalRequests <= result.diagnostics.budget.maxRetrievalRequests);
+        assert.ok((result.diagnostics.graph?.runDiscoveryReads ?? 0) <= GRAPH_LIMITS.runDiscoveryReads);
+        assert.ok((result.diagnostics.graph?.runVerificationReads ?? 0) <= GRAPH_LIMITS.runVerificationReads);
+      }
+      assert.deepEqual((await first.db.getAll(...watched)).map((doc) => doc.data()), original);
+      console.info('Narrative real Emulator comparison', JSON.stringify({
+        baseline: { sources: baseline.evidence.map((row) => row.sourceEntityId), retrievalRequests: baseline.diagnostics.retrievalRequests, chars: baseline.diagnostics.memoryChars },
+        treatment: { sources: actual.evidence.map((row) => row.sourceEntityId), retrievalRequests: actual.diagnostics.retrievalRequests,
+          discoveryReads: actual.diagnostics.graph?.discoveryReads, verificationReads: actual.diagnostics.graph?.verificationReads, chars: actual.diagnostics.memoryChars },
+      }));
+    });
+
+    await t.test('NM24: a graph read failure preserves the verified keyword path', async () => {
+      const originalCollection = first.db.doc(base).collection;
+      const prototype = Object.getPrototypeOf(first.db.doc(base));
+      const injected = t.mock.method(prototype, 'collection', function (this: DocumentReference, name: string) {
+        if (name === 'narrativeMemoryLinks') throw new Error('SIMULATED_GRAPH_READER_OFFLINE');
+        return originalCollection.call(this, name);
+      });
+      try {
+        const actual = await createSceneMemoryRetriever(retrieval)(scenePlan);
+        assert.equal(actual.diagnostics.graph?.status, 'SEARCH_FAILED');
+        assert.deepEqual(actual.evidence.map((row) => row.sourceEntityId), [meeting.id]);
+      } finally { injected.mock.restore(); }
+    });
+
+    await t.test('NM15, NM16, NM27: stale Revision, retired index and deleted bridge never admit a connected memory', async () => {
+      const ref = first.db.doc(`${base}/timelineEvents/${betrayal.id}`);
+      const manifestRef = first.db.doc(`${base}/ragManifest/control`);
+      const manifest = (await manifestRef.get()).data() as FirestoreRagManifestDoc;
+      const key = `${owner.uid}:${projectId}:TIMELINE_EVENT:${betrayal.id}`;
+      const old = manifest.entityStates![key];
+      await manifestRef.set({ ...manifest, retiredGenerationsByEntity: {
+        ...manifest.retiredGenerationsByEntity, [key]: { retiredThroughGen: old.activeGeneration, retiredGens: [] },
+      } });
+      assert.equal((await query()).entries.find((row) => row.link.id === linkId)?.status, 'STALE');
+      assert.ok(!(await createSceneMemoryRetriever(retrieval)(scenePlan)).evidence.some((row) => row.sourceEntityId === betrayal.id));
+      await manifestRef.set(manifest);
+      await ref.update({ summary: '새 정사 내용', sourceRevisionId: 'rev_replaced' });
+      await first.db.doc(`${base}/revisions/rev_replaced`).set({ ...scope, id: 'rev_replaced', episodeId: ep35.id, content: '새 원본' });
+      assert.equal((await query()).entries.find((row) => row.link.id === linkId)?.status, 'STALE');
+      await ref.delete();
+      const safe = await createSceneMemoryRetriever(retrieval)(scenePlan);
+      assert.ok(safe.diagnostics.graph?.rejected.DELETED_NODE);
+      assert.ok(safe.evidence.every((row) => row.sourceEntityId === meeting.id));
+      assert.equal((await query(second.db)).entries.find((row) => row.link.id === linkId)?.reason, 'DELETED_NODE');
+      const refused = await confirm({ ...initial, status: 'REJECTED', expectedVersion: 2, operationId: randomUUID() });
+      assert.equal(refused.version, 3);
+      assert.equal((await query(second.db)).entries.find((row) => row.link.id === linkId)?.status, 'REJECTED');
+      assert.deepEqual((await first.db.getAll(...watched)).map((doc) => doc.data()), original);
+    });
+    await t.test('NM4, NM7–NM11: scoped Writer distinguishes tested injury history and verified clue lifecycle', async () => {
+      const wound = event('wound', ep35, '흰뼈 부상', '왼손을 다쳐 검을 들 수 없었다.', 36);
+      const revealScene: Scene = { ...scope, id: 'clue_scene', episodeId: ep72.id, sceneNumber: 1, title: '폐탑',
+        summary: '바닥이 무너졌다.', location: '폐탑', pointOfViewCharacterId: 'seorin', eventIds: ['clue_event'],
+        characterIds: actors, foreshadowingIds: ['seal'], canonStatus: 'CANON', sourceRevisionId: ep72.latestRevisionId!,
+        createdAt: clock, updatedAt: clock };
+      const clueEvent = { ...event('clue_event', ep72, '폐탑 붕괴', '폐탑 아래에서 다른 방으로 들어갔다.', 73),
+        sceneId: revealScene.id, linkedForeshadowingIds: ['seal'] };
+      const clue: Foreshadowing = { ...scope, id: 'seal', title: '분실된 열쇠', description: '은빛 열쇠가 갑자기 사라졌다.',
+        cluePhase: 'PLANTED', canonStatus: 'CANON', plantedEpisodeId: ep72.id, plantedSceneId: revealScene.id,
+        resolvedEpisodeId: ep400.id, resolvedSceneId: '', relatedEventIds: [clueEvent.id], relatedCharacterIds: actors,
+        sourceRevisionId: ep72.latestRevisionId!, createdBy: 'AUTHOR', createdAt: clock, updatedAt: clock, memoryKnowledge: { scope: 'PUBLIC' } };
+      await Promise.all([
+        first.db.doc(`${base}/timelineEvents/${wound.id}`).set(wound),
+        first.db.doc(`${base}/timelineEvents/${clueEvent.id}`).set(clueEvent),
+        first.db.doc(`${base}/scenes/${revealScene.id}`).set(revealScene),
+        first.db.doc(`${base}/foreshadowings/${clue.id}`).set(clue),
+      ]);
+      setCustomGeminiEmbedContentForTesting(async ({ contents }) => ({ embeddings: [{ values: computeDeterministicSemanticEmbedding(contents, 768) }] }));
+      const items = extractProjectMemoryIndexInputs({ ...scope, characters: [], worldbuilding: [], episodes: [ep35, ep72],
+        timelineEvents: [wound, clueEvent], foreshadowings: [clue] }).filter(({ sourceEntityType }) =>
+        sourceEntityType === 'TIMELINE_EVENT' || sourceEntityType === 'FORESHADOWING');
+      for (const item of items) await indexMemoryInputOnServer(item, { db: first.db, cacheNamespace: run,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+      setCustomGeminiEmbedContentForTesting(null);
+      rows.push(...(await listMemoryKnowledge(first.db, owner.uid, { projectId, sourceEntityId: wound.id })).rows);
+      const state = { characterId: 'seorin', axis: 'HEALTH' as const };
+      await confirm(command('meeting', 'wound', { relation: 'CHANGES_CHARACTER_STATE', state }));
+      await confirm(command('wound', 'recovery', { relation: 'CHANGES_CHARACTER_STATE', state }));
+      const tailored = async (id: string, seed: TimelineEvent) => {
+        const pinned = { ...scenePlan, title: seed.title, purpose: seed.title, mustIncludeEvent: seed.title, memory: { requiredEventIds: [seed.id] } };
+        const stored = { ...plan, id, episodeGoal: seed.title, scenes: [pinned] };
+        await first.db.doc(`${base}/writingPlans/${id}`).set(stored);
+        return createSceneMemoryRetriever({ ...retrieval, plan: stored, context: { ...context, episodeTitle: seed.title, plotOutline: seed.title } })(pinned);
+      };
+      const stateMemory = await tailored('health', wound);
+      assert.ok(stateMemory.diagnostics.graph?.characterStates?.some((row) => row.nodeId === wound.id && row.status === 'HISTORICAL'),
+        JSON.stringify(stateMemory.diagnostics));
+      assert.equal(stateMemory.evidence.find((row) => row.sourceEntityId === wound.id)?.temporalStatus, 'SUPERSEDED_HISTORICAL_STATE');
+      assert.equal(stateMemory.evidence.find((row) => row.sourceEntityId === recovery.id)?.temporalStatus, 'CURRENT_VALID_STATE', JSON.stringify(stateMemory.diagnostics));
+      const planted = await previewNarrativeLinks(first.db, owner.uid, { projectId, nodeType: 'TIMELINE_EVENT', nodeId: clueEvent.id });
+      assert.ok(planted.entries.some((row) => row.edge.relation === 'PLANTS_FORESHADOWING' && row.clueStatus === 'UNRESOLVED'));
+      const clueMemory = await tailored('clue', clueEvent);
+      assert.ok(clueMemory.evidence.some((row) => row.sourceEntityId === clue.id), JSON.stringify(clueMemory.diagnostics));
+      assert.equal(clueMemory.diagnostics.graph?.foreshadowingLinks, 1);
+      await first.db.doc(`${base}/foreshadowings/${clue.id}`).update({ cluePhase: 'RESOLVED' });
+      const inspected = await previewNarrativeLinks(first.db, owner.uid, { projectId, nodeType: 'FORESHADOWING', nodeId: clue.id });
+      assert.ok(inspected.entries.every((row) => row.clueStatus === 'RESOLVED'));
+      assert.ok(!(await tailored('resolved_clue', clueEvent)).evidence.some((row) => row.sourceEntityId === clue.id));
+      await first.db.doc(`${base}/characters/dohyeon`).set({ ...scope, id: 'dohyeon', name: '도현', canonStatus: 'CANON' });
+      const relationship = (id: string, trigger: TimelineEvent, relationType: string, description: string): CharacterRelationship => ({
+        ...scope, id, sourceCharacterId: 'seorin', targetCharacterId: 'dohyeon', relationType, description, affinityScore: 0,
+        isDirectional: true, canonStatus: 'CANON', effectiveEpisodeId: trigger.episodeId, effectiveEventId: trigger.id,
+        sourceRevisionId: trigger.sourceRevisionId, memoryKnowledge: { scope: 'PUBLIC' }, createdBy: 'AUTHOR', createdAt: clock, updatedAt: clock,
+      });
+      const old = relationship('old_pact', meeting, '쌍월의 계약', '계약을 맺었다.');
+      const latest = relationship('new_pact', wound, '쌍월의 결별', '계약을 끝냈다.');
+      await Promise.all([old, latest].map((row) => first.db.doc(`${base}/relationships/${row.id}`).set(row)));
+      setCustomGeminiEmbedContentForTesting(async ({ contents }) => ({ embeddings: [{ values: computeDeterministicSemanticEmbedding(contents, 768) }] }));
+      const pairs = extractProjectMemoryIndexInputs({ ...scope, characters: [], worldbuilding: [], episodes: [ep10, ep35], relationships: [old, latest] })
+        .filter(({ sourceEntityType }) => sourceEntityType === 'RELATIONSHIP');
+      for (const item of pairs) await indexMemoryInputOnServer(item, { db: first.db, cacheNamespace: run,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+      setCustomGeminiEmbedContentForTesting(null);
+      const pairScene = { ...scenePlan, title: '쌍월', purpose: '쌍월', mustIncludeEvent: '쌍월', memory: {} };
+      const pairPlan = { ...plan, id: 'pair_plan', scenes: [pairScene] };
+      await first.db.doc(`${base}/writingPlans/${pairPlan.id}`).set(pairPlan);
+      const history = await createSceneMemoryRetriever({ ...retrieval, plan: pairPlan, graph: false })(pairScene);
+      assert.equal(history.evidence.find((row) => row.sourceEntityId === old.id)?.temporalStatus, 'SUPERSEDED_HISTORICAL_STATE', JSON.stringify(history.diagnostics));
+      assert.equal(history.evidence.find((row) => row.sourceEntityId === latest.id)?.temporalStatus, 'CURRENT_VALID_STATE', JSON.stringify(history.diagnostics));
     });
   } finally {
     setCustomGeminiEmbedContentForTesting(null);

@@ -1378,6 +1378,8 @@ export function assembleNovelWriterPromptInOrder(params: {
               ...(item.temporalStatus === 'SUPERSEDED_HISTORICAL_STATE' ? ['  시간 상태: 과거 상태입니다. 현재 유효한 상태로 묘사하지 마십시오.'] :
                 item.temporalStatus === 'CURRENT_VALID_STATE' ? ['  시간 상태: 장면 시점에 유효합니다.'] :
                 item.temporalStatus === 'PAST_EVENT' ? [item.temporalBasis === 'EPISODE_ORDER' ? '  시간 상태: 출간 회차 기준으로 앞선 자료입니다.' : '  시간 상태: 설정된 장면 시점보다 앞선 사건입니다.'] : []),
+              ...(item.narrativeLink ? ['  작가 승인 서사 연결: ' + item.narrativeLink.from.type + ':' + item.narrativeLink.from.id + ' → ' +
+                item.narrativeLink.to.type + ':' + item.narrativeLink.to.id + ' (' + item.narrativeLink.relation + '). 연결 유형에 명시된 관계만 사용하십시오.'] : []),
               ...(item.knowledgeEligibility === 'UNKNOWN_KNOWLEDGE_SCOPE'
                 ? ['  지식 범위: 전지적 서술 참고용입니다. 인물의 대사·생각·행동에 이미 아는 정보로 쓰지 마십시오.'] : []),
               `  제목/구간: ${sanitizeEmbeddedDataAgainstCommandInjection(item.title)}`,

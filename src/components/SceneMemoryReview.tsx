@@ -1,3 +1,4 @@
+import { relationLabels } from './NarrativeMemoryPanel';
 import type { SceneMemoryDiagnostics } from '../types/sceneMemory';
 
 const statusLabels: Record<SceneMemoryDiagnostics['status'], string> = {
@@ -32,8 +33,16 @@ const knowledge = {
 };
 const signals: Record<SceneMemoryDiagnostics['selected'][number]['signals'][number], string> = {
   SEMANTIC: '의미', KEYWORD: '키워드', CHARACTER: '등장인물', SCENE_GOAL: '장면 목적',
-  FORESHADOWING: '복선', RELATIONSHIP: '관계', TEMPORAL: '시간 상태',
+  GRAPH: '서사 연결', FORESHADOWING: '복선', RELATIONSHIP: '관계', TEMPORAL: '시간 상태',
   AUTHOR_IMPORTANCE: '작가 지정 중요도', SOURCE_DIVERSITY: '출처 다양성', FRESHNESS: '원본 검증',
+};
+
+const graphStatuses = { DISABLED: '비활성', NO_SEEDS: '검증된 시작점 없음', NO_LINKS: '사용할 연결 없음', EXPANDED: '탐색 완료', BUDGET_LIMITED: '탐색 한도 도달', SEARCH_FAILED: '그래프 검색 실패' };
+const narrativeStates = { HISTORICAL: '과거 상태', CURRENT: '현재 유효', FUTURE_PLANNED: '이후 상태', CONFLICTED: '충돌', UNKNOWN: '확인 필요' };
+const graphReasons: Record<string, string> = {
+  UNVERIFIED_LINK: '미검증 연결', STALE_LINK: '변경된 연결', DELETED_NODE: '삭제된 출처', CROSS_PROJECT_LINK: '다른 작품의 연결',
+  CAUSAL_EVIDENCE_MISSING: '인과 근거 부족', FUTURE_EVENT: '이후 사건', POV_KNOWLEDGE_RESTRICTED: '시점 인물의 지식 범위 밖',
+  GRAPH_DEPTH_EXCEEDED: '깊이 한도 도달', GRAPH_BUDGET_EXCEEDED: '탐색 예산 소진', DUPLICATE_NODE: '중복 방문', CYCLIC_PATH: '순환 경로',
 };
 
 export function SceneMemoryReview({ records }: { records: SceneMemoryDiagnostics[] }) {
@@ -60,6 +69,17 @@ export function SceneMemoryReview({ records }: { records: SceneMemoryDiagnostics
             {' · 실행 누적 검색 '}{record.retrievalRequests}/{budget.maxRetrievalRequests}
             {' · 임베딩 시도 '}{record.embeddingRequests}/{budget.maxEmbeddingRequests}
           </p>
+          {record.graph && <div className="space-y-1 text-slate-400">
+            <p>서사 그래프 · {graphStatuses[record.graph.status]} · 시작 {record.graph.seeds} · 노드 {record.graph.visitedNodes}
+              {' · 연결 '}{record.graph.visitedEdges}{' · 깊이 '}{record.graph.depth}{' · 추가 후보 '}{record.graph.newCandidates}</p>
+            <p>검증 연결 {record.graph.verifiedLinks} · 인과 {record.graph.causalLinks} · 관계 {record.graph.relationshipLinks} · 복선 {record.graph.foreshadowingLinks}
+              {' · 실행 누적 탐색/검증 읽기 '}{record.graph.runDiscoveryReads}{' / '}{record.graph.runVerificationReads}</p>
+            {(record.graph.relationshipStates ?? []).map(({ nodeId, status }) =>
+              <p key={nodeId}>관계 {nodeId} · {narrativeStates[status]}</p>)}
+            {(record.graph.characterStates ?? []).map(({ nodeId, characterId, axis, status }) =>
+              <p key={nodeId + characterId + axis}>인물 상태 {characterId} · {axis} · {narrativeStates[status]} · {nodeId}</p>)}
+            {Object.entries(record.graph.rejected).map(([reason, count]) => <p key={reason}>{graphReasons[reason] ?? reason} {count}건</p>)}
+          </div>}
           {missing.length > 0 && <p className="break-all text-amber-300">회수하지 못한 중요 출처 {missing.join(', ')}</p>}
           {record.selected.length > 0 && (
             <ul className="space-y-1">
@@ -71,6 +91,7 @@ export function SceneMemoryReview({ records }: { records: SceneMemoryDiagnostics
                     {item.sourceEntityId} · Revision {item.sourceRevisionId}
                     {' · '}{item.retrievalSource ? modes[item.retrievalSource] ?? item.retrievalSource : '검색 방식 미기록'}
                     {item.annotationVersion && (' · 기억 승인 v' + item.annotationVersion)}
+                    {item.graphDepth && (' · ' + item.graphDepth + '단계 ' + (item.graphRelation ? relationLabels[item.graphRelation] : '서사 연결'))}
                     {' · 의미 '}{item.semanticScore.toFixed(2)}{' · 키워드 '}{item.keywordScore.toFixed(2)}
                   </p>
                 </li>

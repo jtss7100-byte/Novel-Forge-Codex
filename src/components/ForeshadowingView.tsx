@@ -71,6 +71,7 @@ export interface ForeshadowingViewProps {
     foreshadowingId: string,
     currentCanonStatus: CanonStatus
   ) => Promise<void>;
+  onOpenNarrative?: (id: string) => void;
   onNavigateToEpisode?: (episodeId: string) => void;
   onNavigateToTimeline?: () => void;
   onNavigateToCharacters?: () => void;
@@ -113,6 +114,7 @@ export const ForeshadowingView: React.FC<ForeshadowingViewProps> = ({
   onUpdateForeshadowing,
   onDeleteForeshadowing,
   onNavigateToEpisode,
+  onOpenNarrative,
   onNavigateToTimeline,
   onNavigateToCharacters,
 }) => {
@@ -1418,6 +1420,8 @@ export const ForeshadowingView: React.FC<ForeshadowingViewProps> = ({
                         <GitBranch className="h-3.5 w-3.5" />
                         <span>계층 추적</span>
                       </button>
+                      {onOpenNarrative && <button type="button" onClick={() => onOpenNarrative(item.id)}
+                        className="rounded border border-indigo-500/40 px-2 py-1.5 text-xs text-indigo-200">서사 연결</button>}
                       <button
                         type="button"
                         onClick={() => openEditForm(item)}

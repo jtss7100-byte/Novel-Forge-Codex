@@ -22,6 +22,7 @@ import { analyzeAuthorStyleOnServer } from './authorStyleAnalyzer.ts';
 import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewCharacterContinuity, voiceAnalysisRequest, VoiceRequestError } from './characterVoiceAnalyzer.ts';
 import { resolveVoicePromptContext } from './voicePromptContext.ts';
 import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinuityDecision, saveVoiceDecisionRequest } from './voiceContinuityDecisions.ts';
+import { NarrativeMemoryError, listNarrativeDecisions, listNarrativeLinks, narrativeCommandSchema, narrativeHistorySchema, narrativeListSchema, narrativePreviewSchema, previewNarrativeLinks, saveNarrativeLink } from './narrativeMemoryStore';
 import { MemoryKnowledgeError, listMemoryKnowledge, listMemoryKnowledgeHistory, listMemoryKnowledgeApprovals, memoryKnowledgeHistorySchema, memoryKnowledgeListSchema, memoryKnowledgeSummarySchema, memoryKnowledgeWriteSchema, saveMemoryKnowledge, summarizeMemoryKnowledge } from './memoryKnowledgeStore';
 import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
 import { cancelEvaluationSession, evaluationCancelInput, evaluationOperationId, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
@@ -576,6 +577,31 @@ export function createApiRouter(): express.Router {
   };
   app.get(['/api/rag/knowledge', '/api/rag/knowledge/summary', '/api/rag/knowledge/history', '/api/rag/knowledge/approvals'], memoryKnowledge);
   app.post('/api/rag/knowledge', memoryKnowledge);
+
+  const narrativeMemory: express.RequestHandler = async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const owner = await resolveRequestOwner(req, true);
+    if (!owner.ok || !owner.isAuthenticatedCloud) {
+      res.status(owner.ok ? 401 : owner.statusCode).json({ error: 'Firebase 로그인이 필요합니다.' });
+      return;
+    }
+    try {
+      const db = getVoiceFirestore();
+      if (req.method === 'POST') res.json(await saveNarrativeLink(db, owner.ownerId, narrativeCommandSchema.parse(req.body)));
+      else if (req.path.endsWith('/history')) res.json(await listNarrativeDecisions(db, owner.ownerId, narrativeHistorySchema.parse(req.query)));
+      else if (req.path.endsWith('/preview')) res.json(await previewNarrativeLinks(db, owner.ownerId, narrativePreviewSchema.parse(req.query)));
+      else res.json(await listNarrativeLinks(db, owner.ownerId, narrativeListSchema.parse(req.query)));
+    } catch (error) {
+      if (error instanceof ZodError) res.status(400).json({ error: 'BAD_REQUEST' });
+      else if (error instanceof NarrativeMemoryError) res.status(error.code === 'INVALID_LINK' ? 400 : 409).json({ error: error.code });
+      else if (error instanceof MemoryKnowledgeError) res.status(error.code === 'FORBIDDEN' ? 403 : 409).json({ error: error.code });
+      else res.status(error instanceof VoiceRequestError ? error.status : 500).json({ error: 'NARRATIVE_MEMORY_UNAVAILABLE' });
+    }
+  };
+  app.get(['/api/rag/narrative', '/api/rag/narrative/history', '/api/rag/narrative/preview'], narrativeMemory);
+  app.post('/api/rag/narrative', narrativeMemory);
+
+
 
   app.get('/api/voice-continuity/decisions', voiceDecisions);
   app.post('/api/voice-continuity/decisions', voiceDecisions);

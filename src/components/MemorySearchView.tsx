@@ -1,3 +1,5 @@
+import { NarrativeMemoryPanel } from './NarrativeMemoryPanel';
+import type { NarrativeNode } from '../types/narrativeMemory';
 import { MemoryKnowledgePanel } from './MemoryKnowledgePanel';
 import type { Scene } from '../types/novel';
 import React, { useState, useEffect, useCallback } from 'react';
@@ -45,6 +47,7 @@ import type {
 interface MemorySearchViewProps {
   ownerId: string;
   idToken: string | null;
+  narrativeFocus?: NarrativeNode;
   activeProject: Project;
   episodes: Episode[];
   characters: Character[];
@@ -105,6 +108,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
 export const MemorySearchView: React.FC<MemorySearchViewProps> = ({
   ownerId,
   idToken,
+  narrativeFocus,
   activeProject,
   episodes,
   characters,
@@ -619,6 +623,8 @@ export const MemorySearchView: React.FC<MemorySearchViewProps> = ({
 
   return (
     <div className="space-y-6" data-testid="memory-search-view">
+      {idToken && <NarrativeMemoryPanel key={activeProject.id + ':' + (narrativeFocus?.id ?? '')}
+        projectId={activeProject.id} token={idToken} characters={characters} focus={narrativeFocus} />}
       {idToken && <MemoryKnowledgePanel key={activeProject.id} projectId={activeProject.id} token={idToken}
         characters={characters} episodes={episodes} scenes={scenes} events={timelineEvents} />}
       {/* Header & Index Status Banner */}

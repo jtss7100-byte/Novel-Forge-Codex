@@ -1,3 +1,4 @@
+import type { NarrativeWriterLink } from './narrativeMemory';
 /**
  * NOVEL FORGE — Phase 2: Professional AI Novel Writing Engine Types
  *
@@ -351,6 +352,7 @@ export interface RagRetrievedEvidenceItem {
   freshnessStatus: 'FRESH' | 'STALE' | 'SOURCE_UNVERIFIED';
   verifiedForWriting: boolean;
   temporalStatus?: MemoryTemporalStatus;
+  narrativeLink?: NarrativeWriterLink;
   temporalBasis?: 'NARRATIVE_CUTOFF' | 'EPISODE_ORDER';
   knowledgeEligibility?: import('./sceneMemory').MemoryKnowledgeEligibility;
 }

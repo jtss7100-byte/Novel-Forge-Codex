@@ -1,57 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import type { DocumentData, Firestore, QuerySnapshot } from 'firebase-admin/firestore';
+import type { Firestore } from 'firebase-admin/firestore';
 import type { RagRetrievedEvidenceItem, ScenePlanItem, WritingContextBundle, WritingPlan } from '../types/aiEngine';
 import type { MemoryChunk, MemoryDocument, NarrativePerspective } from '../types/foundation';
 import type { MemoryRetrievalBudget, SceneMemoryDiagnostics, SceneMemoryResult } from '../types/sceneMemory';
 import { FoundationMemorySearchStore, tokenizeKoreanSearchTerms, type RagExecutionSearchStatus, type MemorySearchHit } from '../services/memorySearchProvider';
-import { buildSceneMemoryRequirements, safeMemoryId, sceneMemoryBudget, selectSceneMemory, verifySceneMemoryProvenance, type SceneMemoryCandidate, type VerifiedMemorySource } from '../utils/sceneMemoryLogic';
+import { buildSceneMemoryRequirements, safeMemoryId, sceneMemoryBudget, selectSceneMemory, verifySceneMemoryProvenance, type SceneMemoryCandidate } from '../utils/sceneMemoryLogic';
 import { generateServerEmbedding, resolveRagFirestore, tryFirestoreVectorFindNearest, type FirestoreRagManifestDoc } from './ragEngine';
 
 import { resolveKnowledgeAcquisition } from './knowledgeAcquisition';
 import { applyWriterMemoryKnowledge } from './memoryKnowledgeStore';
-import { buildVerifiedSource, episodePosition, finite, generationStatus, idList, isCanon, makeSourceReader, scopedCollection } from './memorySourceAuthority';
+import { buildVerifiedSource, episodePosition, generationStatus, idList, isCanon, makeSourceReader, scopedCollection } from './memorySourceAuthority';
+
+import { GRAPH_LIMITS, graphDiagnostics, narrativeNodeKey, rejectGraph } from '../utils/narrativeMemoryLogic';
+import { graphAuthoritiesStillActive, graphEligibility, graphNode, newGraphRun, retrieveNarrativeGraph } from './narrativeMemoryGraph';
+import { relationshipHistoryReader } from './narrativeRelationshipHistory';
 
 const storedPerspective = (value: unknown): NarrativePerspective | undefined =>
   value === 'FIRST_PERSON' || value === 'THIRD_LIMITED' || value === 'OMNISCIENT' || value === 'MIXED' ? value : undefined;
-
-// A bounded pair query prevents a retrieved historical relationship from being labeled current
-// merely because its replacement was absent from the search results.
-async function classifyRelationship(db: Firestore, reader: ReturnType<typeof makeSourceReader>, ownerId: string, projectId: string,
-  source: VerifiedMemorySource, record: DocumentData, cutoff: number, nonlinear: boolean,
-  queryBySource: Map<string, Promise<QuerySnapshot>>) {
-  if (!safeMemoryId(record.sourceCharacterId) || !safeMemoryId(record.targetCharacterId)) return;
-  const first = record.sourceCharacterId, second = record.targetCharacterId;
-  const list = db.collection(`${reader.base}/relationships`);
-  const query = (id: string) => {
-    const cached = queryBySource.get(id) ?? list.where('sourceCharacterId', '==', id).limit(26).get();
-    queryBySource.set(id, cached);
-    return cached;
-  };
-  const [left, right] = await Promise.all([query(first), record.isDirectional || first === second ? undefined : query(second)]);
-  if (left.size > 25 || (right?.size ?? 0) > 25) return;
-  const order = nonlinear ? source.narrativeOrder : source.episodeNumber;
-  if (order === undefined) return;
-  let uncertain = false;
-  for (const snapshot of [...left.docs, ...(right?.docs ?? [])]) {
-    const item = snapshot.data();
-    if (item.ownerId !== ownerId || item.projectId !== projectId || item.id !== snapshot.id || snapshot.id === source.id ||
-        item.isDirectional !== record.isDirectional || !isCanon(item)) continue;
-    const samePair = item.sourceCharacterId === first && item.targetCharacterId === second ||
-      (!record.isDirectional && item.sourceCharacterId === second && item.targetCharacterId === first);
-    if (!samePair) continue;
-    const episode = await reader.entity('episodes', item.effectiveEpisodeId);
-    const event = nonlinear ? await reader.entity('timelineEvents', item.effectiveEventId) : undefined;
-    const position = nonlinear ? isCanon(event) ? finite(event?.chronologicalOrder) : undefined :
-      isCanon(episode) ? finite(episode?.episodeNumber) : undefined;
-    if (position === undefined || position === order) uncertain = true;
-    else if (position > order && position < cutoff) {
-      source.historicalState = true;
-      return;
-    }
-  }
-  // A future replacement does not invalidate the latest state known at this cutoff.
-  if (!uncertain && order < cutoff) source.currentState = true;
-}
 
 const stableScene = (scene: ScenePlanItem) => JSON.stringify([
   scene.sceneNumber, scene.title, scene.purpose, scene.mustIncludeEvent, scene.characterIds,
@@ -138,12 +103,14 @@ const searchSceneCandidates: SceneSearch = async ({ db, ownerId, projectId, text
 
 export function createSceneMemoryRetriever(params: {
   ownerId: string; context: WritingContextBundle; plan?: WritingPlan | null; budget?: Partial<MemoryRetrievalBudget>;
-  db?: Firestore;
+  db?: Firestore; graph?: boolean;
 }) {
   const { ownerId, context, plan } = params;
   const db = safeMemoryId(ownerId) && safeMemoryId(context.projectId) && ownerId !== 'local_author' ? resolveRagFirestore({ db: params.db }) : null;
   const runBudget = sceneMemoryBudget(undefined, params.budget);
   const reader = db ? makeSourceReader(db, ownerId, context.projectId) : undefined;
+  const graphRun = newGraphRun();
+  const classifyRelationships = db ? relationshipHistoryReader(db, ownerId, context.projectId) : undefined;
   const searchCache = new Map<string, Awaited<ReturnType<SceneSearch>>>();
   let retrievalRequests = 0;
   let embeddingRequests = 0;
@@ -161,6 +128,7 @@ export function createSceneMemoryRetriever(params: {
     const basic = buildSceneMemoryRequirements(context, scene, { episodeNumber: 0 });
     const diagnostics: SceneMemoryDiagnostics = {
       id: randomUUID(), requirements: basic, status: 'AUTHORITY_UNAVAILABLE', searchModes: [], candidateCount: 0,
+      graph: { ...graphDiagnostics(), status: params.graph === false ? 'DISABLED' : 'NO_SEEDS' },
       selected: [], rejected: [], budget: runBudget, memoryChars: 0, estimatedMemoryTokens: 0, retrievalRequests, embeddingRequests,
       missingRequiredEventIds: basic.requiredEventIds, missingForeshadowingIds: basic.relatedForeshadowingIds,
     };
@@ -251,7 +219,6 @@ export function createSceneMemoryRetriever(params: {
       });
       await reader.batch(sourcePaths);
       const verified: SceneMemoryCandidate[] = [];
-      const relationshipQueries = new Map<string, Promise<QuerySnapshot>>();
       for (const hit of candidates) {
         const cached = hit.chunk;
         const chunk = index.get(`${reader.base}/memoryChunks/${cached.id}`) as MemoryChunk | undefined;
@@ -272,10 +239,6 @@ export function createSceneMemoryRetriever(params: {
             const source = await buildVerifiedSource(chunk, reader, ownerId, context.projectId, approved, pov).catch(() => undefined);
             reason = verifySceneMemoryProvenance({ ownerId, projectId: context.projectId, chunk, document, source, generation });
             if (!reason && source) {
-              if (chunk.sourceEntityType === 'RELATIONSHIP' && sourceRef) {
-                await classifyRelationship(db, reader, ownerId, context.projectId, source, sourceRef.record,
-                  requirements.narrativeCutoff?.order ?? episodeNumber, Boolean(requirements.narrativeCutoff), relationshipQueries);
-              }
               verified.push({ hit: { ...hit, chunk, document }, source });
             }
           }
@@ -283,16 +246,78 @@ export function createSceneMemoryRetriever(params: {
         if (reason) diagnostics.rejected.push({ chunkId: cached.id, reason });
       }
       await applyWriterMemoryKnowledge(db, reader, ownerId, context.projectId, verified, requirements);
-      // Re-check the active pointer immediately before admitting evidence to the Writer.
+      const seeds = selectSceneMemory(requirements, verified, { ...budget, maxSelectedChunks: GRAPH_LIMITS.seeds }).selected;
+      const alreadyEligible = verified.filter((item) => !graphEligibility(item, requirements)).length;
+      const graph = params.graph === false ? undefined : await retrieveNarrativeGraph({
+        db, ownerId, projectId: context.projectId, manifest, requirements, approvedScene: approved, seedReader: reader,
+        base: verified, seeds, limit: Math.min(6, Math.max(0, budget.maxCandidateCount - alreadyEligible)), run: graphRun,
+        canRetrieve: () => retrievalRequests < maxSearches,
+        claimRetrieval: () => {
+          if (retrievalRequests >= maxSearches) return false;
+          retrievalRequests++;
+          return true;
+        },
+      });
+      diagnostics.retrievalRequests = retrievalRequests;
+      diagnostics.graph = graph?.diagnostics ?? { ...graphDiagnostics(), status: 'DISABLED' };
+
+      // Re-check the active pointer for all graph path nodes, including intermediates.
       const latestManifest = (await manifestRef.get()).data() as FirestoreRagManifestDoc | undefined;
-      const active = verified.filter(({ hit }) => {
+      const graphFresh = Boolean(graph && graphAuthoritiesStillActive(graph, ownerId, context.projectId, latestManifest));
+      if (graph && !graphFresh) {
+        rejectGraph(graph.diagnostics, 'STALE_LINK');
+        graph.diagnostics.status = 'SEARCH_FAILED';
+        graph.diagnostics.newCandidates = 0;
+        graph.diagnostics.characterStates = [];
+      }
+      const fresh = (item: SceneMemoryCandidate) => {
+        const { hit } = item;
         const status = generationStatus(ownerId, context.projectId, latestManifest, hit.chunk, hit.document);
         if (status === 'ACTIVE') return true;
         diagnostics.rejected.push({ chunkId: hit.chunk.id, reason: status === 'DELETED' ? 'DELETED_SOURCE' :
           status === 'RETIRED' ? 'RETIRED_GENERATION' : 'SOURCE_UNVERIFIED' });
         return false;
-      });
-      const selection = selectSceneMemory(requirements, active, budget);
+      };
+      const annotated = (candidate: SceneMemoryCandidate) => {
+        if (!graphFresh || !graph) return candidate;
+        const node = graphNode(candidate);
+        if (!node) return candidate;
+        const path = graph.paths.get(narrativeNodeKey(node));
+        const linked = graph.links.some((edge) => graph.linkProofs.get(edge.id)?.includes(candidate.hit.chunk.id));
+        const states = graph.diagnostics.characterStates?.filter((state) => state.nodeId === node.id && node.type === 'TIMELINE_EVENT');
+        const state = states?.length === 1 ? states[0].status : undefined;
+        return { ...candidate, graphPath: path, graphLinked: linked, source: state ? { ...candidate.source, currentState: state === 'CURRENT', historicalState: state === 'HISTORICAL' } : candidate.source };
+      };
+      const activeBase = verified.filter(fresh);
+      const expanded = graphFresh && graph ? graph.candidates.filter(fresh) : [];
+      const active = [...activeBase, ...expanded].map(annotated);
+      if (active.length > budget.maxCandidateCount) {
+        const overflow = active.length - budget.maxCandidateCount;
+        const dropped = new Set(active.filter((item) => graphEligibility(item, requirements)).slice(0, overflow).map((item) => item.hit.chunk.id));
+        for (let i = active.length - 1; i >= 0; i--) if (dropped.has(active[i].hit.chunk.id)) {
+          diagnostics.rejected.push({ chunkId: active[i].hit.chunk.id, reason: 'BUDGET_EXCEEDED' });
+          active.splice(i, 1);
+        }
+      }
+      diagnostics.candidateCount = Math.min(budget.maxCandidateCount, Math.max(diagnostics.candidateCount, active.length));
+      try {
+        diagnostics.graph.relationshipStates = await classifyRelationships?.(active, reader, requirements);
+      } catch {
+        // A failed history query cannot establish a current relationship.
+        for (const candidate of active) if (candidate.hit.chunk.sourceEntityType === 'RELATIONSHIP') {
+          candidate.source = { ...candidate.source, currentState: false, historicalState: false };
+        }
+      }
+      const selection = selectSceneMemory(requirements, active.slice(0, budget.maxCandidateCount), budget);
+      const selectedIds = new Set(selection.selected.map(({ hit }) => hit.chunk.id));
+      const visibleLink = (chunkId: string) => {
+        if (!graphFresh || !graph) return undefined;
+        const edge = graph.links.find((row) => {
+          const proof = graph.linkProofs.get(row.id);
+          return row.status === 'AUTHOR_CONFIRMED' && proof?.[1] === chunkId && proof.every((id) => selectedIds.has(id));
+        });
+        return edge && { from: edge.from, to: edge.to, relation: edge.relation };
+      };
       diagnostics.selected = selection.selected.map((item) => item.selection);
       diagnostics.rejected.push(...selection.rejected);
       diagnostics.status = selection.selected.length ? 'SELECTED' : 'FILTERED';
@@ -308,6 +333,7 @@ export function createSceneMemoryRetriever(params: {
         sourceEndOffset: hit.chunk.sourceEndOffset!, score: hit.score, relevanceScore: selection.score,
         keywordScore: hit.keywordScore, semanticScore: hit.semanticScore, matchedTerms: hit.matchedTerms,
         canonStatus: 'CANON', freshnessStatus: 'FRESH', verifiedForWriting: true, temporalStatus: selection.temporal, knowledgeEligibility: selection.knowledge,
+        narrativeLink: visibleLink(hit.chunk.id),
         temporalBasis: requirements.narrativeCutoff ? 'NARRATIVE_CUTOFF' : 'EPISODE_ORDER',
       }));
       return { evidence, diagnostics };

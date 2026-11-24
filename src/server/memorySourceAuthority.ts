@@ -55,7 +55,7 @@ export function generationStatus(ownerId: string, projectId: string, manifest: F
 }
 
 type CloudSource = { record: DocumentData; exists: boolean };
-export function makeSourceReader(db: Firestore, ownerId: string, projectId: string, tx?: Transaction) {
+export function makeSourceReader(db: Firestore, ownerId: string, projectId: string, tx?: Transaction, beforeRead?: () => void) {
   const base = `users/${ownerId}/projects/${projectId}`;
   // Small lookups are shared across scenes. The final chunk, parent and manifest reads remain fresh.
   const records = new Map<string, CloudSource>();
@@ -65,6 +65,7 @@ export function makeSourceReader(db: Firestore, ownerId: string, projectId: stri
     for (let index = 0; index < missing.length; index += 80) {
       const slice = missing.slice(index, index + 80);
       const refs = slice.map((path) => db.doc(`${base}/${path}`));
+      beforeRead?.();
       const snapshots = await (tx ? tx.getAll(...refs) : db.getAll(...refs));
       snapshots.forEach((snap) => records.set(snap.ref.path.slice(base.length + 1), { exists: snap.exists, record: snap.data() ?? {} }));
     }

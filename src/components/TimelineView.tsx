@@ -59,6 +59,7 @@ export interface TimelineViewProps {
     eventId: string,
     currentCanonStatus: CanonStatus
   ) => Promise<void>;
+  onOpenNarrative?: (id: string) => void;
   onNavigateToEpisode?: (episodeId: string) => void;
   onNavigateToForeshadowing?: () => void;
 }
@@ -83,6 +84,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   onUpdateTimelineEvent,
   onDeleteTimelineEvent,
   onNavigateToEpisode,
+  onOpenNarrative,
   onNavigateToForeshadowing,
 }) => {
   const [sortMode, setSortMode] = useState<
@@ -1402,6 +1404,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         <span>정사로 확정</span>
                       </button>
                     )}
+                    {onOpenNarrative && <button type="button" onClick={() => onOpenNarrative(evt.id)}
+                        className="rounded border border-indigo-500/40 px-2 py-1.5 text-xs text-indigo-200">서사 연결</button>}
                     <button
                       type="button"
                       onClick={() => openEditForm(evt)}

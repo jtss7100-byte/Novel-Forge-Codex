@@ -1,3 +1,4 @@
+import type { NarrativeGraphDiagnostics, NarrativeRelation } from './narrativeMemory';
 import type { RagRetrievedEvidenceItem } from './aiEngine';
 import type { NarrativePerspective } from './foundation';
 
@@ -56,7 +57,7 @@ export type MemoryRejectionReason =
 export type MemoryTemporalStatus = 'PAST_EVENT' | 'CURRENT_VALID_STATE' | 'SUPERSEDED_HISTORICAL_STATE';
 export type MemoryKnowledgeEligibility = 'PUBLIC' | 'POV_CHARACTER_KNOWLEDGE' | 'AUTHOR_KNOWLEDGE' | 'UNKNOWN_KNOWLEDGE_SCOPE';
 export type MemoryRerankingSignal = 'SEMANTIC' | 'KEYWORD' | 'CHARACTER' | 'SCENE_GOAL' | 'FORESHADOWING'
-  | 'RELATIONSHIP' | 'TEMPORAL' | 'AUTHOR_IMPORTANCE' | 'SOURCE_DIVERSITY' | 'FRESHNESS';
+  | 'GRAPH' | 'RELATIONSHIP' | 'TEMPORAL' | 'AUTHOR_IMPORTANCE' | 'SOURCE_DIVERSITY' | 'FRESHNESS';
 
 export interface SceneMemorySelection {
   chunkId: string;
@@ -72,6 +73,8 @@ export interface SceneMemorySelection {
   keywordScore: number;
   retrievalSource?: string;
   annotationVersion?: number;
+  graphDepth?: number;
+  graphRelation?: NarrativeRelation;
 }
 
 export interface SceneMemoryDiagnostics {
@@ -80,6 +83,7 @@ export interface SceneMemoryDiagnostics {
   status: 'SELECTED' | 'NO_MATCHES' | 'FILTERED' | 'SEARCH_FAILED' | 'AUTHORITY_UNAVAILABLE' | 'BUDGET_EXCEEDED';
   searchModes: string[];
   vectorFallback?: boolean;
+  graph?: NarrativeGraphDiagnostics;
   candidateCount: number;
   selected: SceneMemorySelection[];
   rejected: { chunkId: string; reason: MemoryRejectionReason }[];
