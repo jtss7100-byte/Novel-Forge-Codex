@@ -1,3 +1,5 @@
+import { annotationEligibility, compareKnowledgePosition } from './memoryKnowledgeLogic';
+import type { MemoryKnowledgeAnnotation, KnowledgePosition } from '../types/memoryKnowledge';
 import type { ScenePlanItem, WritingContextBundle } from '../types/aiEngine';
 import type { MemoryChunk, MemoryDocument, NarrativePerspective } from '../types/foundation';
 import type { MemoryKnowledgeEligibility, MemoryRejectionReason, MemoryRerankingSignal, MemoryRetrievalBudget, MemoryTemporalStatus, SceneMemoryKnowledge, SceneMemoryRequirements, SceneMemorySelection } from '../types/sceneMemory';
@@ -61,6 +63,12 @@ export interface VerifiedMemorySource {
   id: string; ownerId: string; projectId: string; canonStatus: string; revisionId: string; texts: string[];
   episodeId?: string;
   sceneId?: string;
+  sceneNumber?: number;
+  legacyKnowledge?: SceneMemoryKnowledge;
+  durableKnowledge?: MemoryKnowledgeAnnotation;
+  legacyAcquisition?: KnowledgePosition;
+  legacySceneScoped?: boolean;
+  knowledgeRejection?: MemoryRejectionReason;
   episodeNumber?: number;
   narrativeOrder?: number;
   knowledge?: SceneMemoryKnowledge;
@@ -107,14 +115,17 @@ export function verifySceneMemoryProvenance(params: {
 
 export interface SceneMemoryCandidate { hit: MemorySearchHit; source: VerifiedMemorySource }
 
-function temporalStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): MemoryTemporalStatus | 'SOURCE_UNVERIFIED' | 'FUTURE_INFORMATION' {
+export function temporalStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): MemoryTemporalStatus | 'SOURCE_UNVERIFIED' | 'FUTURE_INFORMATION' | 'TEMPORAL_EVIDENCE_MISSING' {
   if (source.knowledge?.timeless && source.episodeNumber === undefined && source.narrativeOrder === undefined &&
       !source.foreshadowingPhase && !source.historicalState && !source.eventIds.length) return 'CURRENT_VALID_STATE';
   const cutoff = requirements.narrativeCutoff;
   const latest = cutoff?.order ?? requirements.episodeNumber;
   const candidateOrder = cutoff ? source.narrativeOrder : source.episodeNumber;
   if (candidateOrder === undefined || !Number.isFinite(candidateOrder)) return 'SOURCE_UNVERIFIED';
-  if (candidateOrder >= latest) return 'FUTURE_INFORMATION';
+  if (!cutoff && source.episodeId && source.episodeId === requirements.episodeId) {
+    if (source.sceneNumber === undefined || requirements.sceneNumber === undefined) return 'TEMPORAL_EVIDENCE_MISSING';
+    if (source.sceneNumber >= requirements.sceneNumber) return 'FUTURE_INFORMATION';
+  } else if (candidateOrder >= latest) return 'FUTURE_INFORMATION';
   if (source.foreshadowingPhase === 'RESOLVED' || source.foreshadowingPhase === 'ABANDONED') {
     const resolution = cutoff ? source.resolvedOrder : source.resolvedEpisodeNumber;
     if (resolution === undefined) return 'SOURCE_UNVERIFIED';
@@ -123,7 +134,14 @@ function temporalStatus(requirements: SceneMemoryRequirements, source: VerifiedM
   return source.historicalState ? 'SUPERSEDED_HISTORICAL_STATE' : source.currentState ? 'CURRENT_VALID_STATE' : 'PAST_EVENT';
 }
 
-function knowledgeStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): MemoryKnowledgeEligibility | 'POV_KNOWLEDGE_RESTRICTED' {
+export function knowledgeStatus(requirements: SceneMemoryRequirements, source: VerifiedMemorySource): Exclude<MemoryKnowledgeEligibility, 'AUTHOR_KNOWLEDGE'> | MemoryRejectionReason {
+  if (source.knowledgeRejection) return source.knowledgeRejection;
+  if (source.durableKnowledge) return annotationEligibility(source.durableKnowledge, requirements);
+  if (source.legacyKnowledge?.scope === 'CHARACTERS' && !source.legacySceneScoped) {
+    if (!source.legacyAcquisition) return 'TEMPORAL_EVIDENCE_MISSING';
+    const timing = compareKnowledgePosition(source.legacyAcquisition, requirements);
+    if (timing !== 'BEFORE') return timing === 'FUTURE' ? 'FUTURE_INFORMATION' : 'TEMPORAL_EVIDENCE_MISSING';
+  }
   const knowledge = source.knowledge;
   if (knowledge?.scope === 'AUTHOR_ONLY') return 'POV_KNOWLEDGE_RESTRICTED';
   if (knowledge?.scope === 'PUBLIC') return 'PUBLIC';
@@ -147,9 +165,9 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
   for (const { hit, source } of candidates) {
     const { chunk } = hit;
     const time = temporalStatus(requirements, source);
-    if (time === 'SOURCE_UNVERIFIED' || time === 'FUTURE_INFORMATION') { reject(chunk.id, time); continue; }
+    if (time === 'SOURCE_UNVERIFIED' || time === 'FUTURE_INFORMATION' || time === 'TEMPORAL_EVIDENCE_MISSING') { reject(chunk.id, time); continue; }
     const knowledge = knowledgeStatus(requirements, source);
-    if (knowledge === 'POV_KNOWLEDGE_RESTRICTED') { reject(chunk.id, knowledge); continue; }
+    if (knowledge !== 'PUBLIC' && knowledge !== 'POV_CHARACTER_KNOWLEDGE' && knowledge !== 'UNKNOWN_KNOWLEDGE_SCOPE') { reject(chunk.id, knowledge); continue; }
     const castMatch = intersects(requirements.characterIds, source.characterIds);
     if (!castMatch && relatedCharacterTypes.has(chunk.sourceEntityType)) { reject(chunk.id, 'LOW_RELEVANCE'); continue; }
     const exact = intersects(requirements.requiredEventIds, source.eventIds) || requirements.relevantWorldbuildingIds.includes(source.id);
@@ -181,6 +199,7 @@ export function selectSceneMemory(requirements: SceneMemoryRequirements, candida
     evaluated.push({ hit, source, selection: {
       chunkId: chunk.id, sourceEntityId: chunk.sourceEntityId, sourceRevisionId: chunk.sourceRevisionId,
       episodeNumber: source.episodeNumber, title: hit.document.title, temporal: time, knowledge, signals,
+      annotationVersion: source.durableKnowledge?.version,
       score: Number(score.toFixed(5)), semanticScore: semantic, keywordScore: keyword, retrievalSource: hit.retrievalSource,
     } });
   }

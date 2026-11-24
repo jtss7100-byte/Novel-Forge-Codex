@@ -1,3 +1,4 @@
+import { ZodError } from 'zod';
 import express from 'express';
 import {
   ensureFirebaseAdminInitialized,
@@ -21,6 +22,7 @@ import { analyzeAuthorStyleOnServer } from './authorStyleAnalyzer.ts';
 import { analyzeCharacterVoice, continuityRequest, getVoiceFirestore, reviewCharacterContinuity, voiceAnalysisRequest, VoiceRequestError } from './characterVoiceAnalyzer.ts';
 import { resolveVoicePromptContext } from './voicePromptContext.ts';
 import { listVoiceContinuityDecisions, listVoiceDecisionQuery, saveVoiceContinuityDecision, saveVoiceDecisionRequest } from './voiceContinuityDecisions.ts';
+import { MemoryKnowledgeError, listMemoryKnowledge, listMemoryKnowledgeHistory, listMemoryKnowledgeApprovals, memoryKnowledgeHistorySchema, memoryKnowledgeListSchema, memoryKnowledgeSummarySchema, memoryKnowledgeWriteSchema, saveMemoryKnowledge, summarizeMemoryKnowledge } from './memoryKnowledgeStore';
 import { VoiceDecisionError } from '../utils/voiceContinuityDecisionLogic';
 import { cancelEvaluationSession, evaluationCancelInput, evaluationOperationId, evaluationReviewInput, evaluationRunInput, EvaluationRequestError, finalizeEvaluationSession, getEvaluationSettings, startEvaluationSession } from './novelWritingEvaluationRunner';
 import { NovelWritingEvaluationSessions } from './novelWritingEvaluationSessions';
@@ -539,6 +541,42 @@ export function createApiRouter(): express.Router {
       }
     }
   };
+  const memoryKnowledge: express.RequestHandler = async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const owner = await resolveRequestOwner(req, true);
+    if (!owner.ok || !owner.isAuthenticatedCloud) {
+      res.status(owner.ok ? 401 : owner.statusCode).json({ error: 'Firebase 로그인이 필요합니다.' });
+      return;
+    }
+    try {
+      const db = getVoiceFirestore();
+      const payload = req.method === 'POST' ? req.body : req.query;
+      if (req.method === 'POST') {
+        res.json(await saveMemoryKnowledge(db, owner.ownerId, memoryKnowledgeWriteSchema.parse(payload)));
+      } else if (req.path.endsWith('/summary')) {
+        res.json(await summarizeMemoryKnowledge(db, owner.ownerId, memoryKnowledgeSummarySchema.parse(payload)));
+      } else if (req.path.endsWith('/approvals')) {
+        res.json(await listMemoryKnowledgeApprovals(db, owner.ownerId, memoryKnowledgeSummarySchema.parse(payload)));
+      } else if (req.path.endsWith('/history')) {
+        res.json(await listMemoryKnowledgeHistory(db, owner.ownerId, memoryKnowledgeHistorySchema.parse(payload)));
+      } else {
+        res.json(await listMemoryKnowledge(db, owner.ownerId, memoryKnowledgeListSchema.parse(payload)));
+      }
+    } catch (error) {
+      if (error instanceof MemoryKnowledgeError) {
+        res.status(error.code === 'FORBIDDEN' ? 403 : error.code === 'BAD_REQUEST' ? 400 : 409).json({ error: error.code });
+      } else if (error instanceof ZodError) {
+        res.status(400).json({ error: 'BAD_REQUEST' });
+      } else if (error instanceof VoiceRequestError) {
+        res.status(error.status).json({ error: 'MEMORY_AUTHORITY_UNAVAILABLE' });
+      } else {
+        res.status(500).json({ error: 'MEMORY_KNOWLEDGE_UNAVAILABLE' });
+      }
+    }
+  };
+  app.get(['/api/rag/knowledge', '/api/rag/knowledge/summary', '/api/rag/knowledge/history', '/api/rag/knowledge/approvals'], memoryKnowledge);
+  app.post('/api/rag/knowledge', memoryKnowledge);
+
   app.get('/api/voice-continuity/decisions', voiceDecisions);
   app.post('/api/voice-continuity/decisions', voiceDecisions);
 

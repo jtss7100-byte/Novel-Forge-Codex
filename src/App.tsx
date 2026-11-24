@@ -3199,6 +3199,7 @@ export default function App() {
               characters={characters}
               worldbuilding={worldbuilding}
               timelineEvents={activeBundle?.timelineEvents || []}
+              scenes={activeBundle?.scenes || []}
               foreshadowings={activeBundle?.foreshadowings || []}
               relationships={activeBundle?.relationships || []}
               onNavigateToSource={({ tab, episodeId }) => {

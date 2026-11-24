@@ -13,6 +13,8 @@ const reasons: Record<SceneMemoryDiagnostics['rejected'][number]['reason'], stri
   STALE_SOURCE: '이전 리비전', SOURCE_UNVERIFIED: '출처 미검증', NON_CANON: '정사 미승인',
   CROSS_PROJECT: '다른 프로젝트', RETIRED_GENERATION: '비활성 색인', DELETED_SOURCE: '삭제된 출처',
   FUTURE_INFORMATION: '장면 이후의 정보', POV_KNOWLEDGE_RESTRICTED: '시점 인물의 지식 범위 밖',
+  STALE_ANNOTATION: '다시 확인해야 할 이전 승인', KNOWLEDGE_SCOPE_CONFLICT: '기존 지식 범위와 충돌',
+  TEMPORAL_EVIDENCE_MISSING: '검증된 획득 시점 없음',
   DUPLICATE_EVIDENCE: '중복 근거', BUDGET_EXCEEDED: '기억 예산 초과', LOW_RELEVANCE: '관련성 낮음',
 };
 
@@ -68,6 +70,7 @@ export function SceneMemoryReview({ records }: { records: SceneMemoryDiagnostics
                   <p className="break-all text-slate-400">
                     {item.sourceEntityId} · Revision {item.sourceRevisionId}
                     {' · '}{item.retrievalSource ? modes[item.retrievalSource] ?? item.retrievalSource : '검색 방식 미기록'}
+                    {item.annotationVersion && (' · 기억 승인 v' + item.annotationVersion)}
                     {' · 의미 '}{item.semanticScore.toFixed(2)}{' · 키워드 '}{item.keywordScore.toFixed(2)}
                   </p>
                 </li>

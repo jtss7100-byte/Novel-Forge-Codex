@@ -965,6 +965,14 @@ service cloud.firestore {
           (exists(target) && get(target).data.ownerId == uid && get(target).data.projectId == projectId && get(target).data.id == targetId);
       }
 
+      // Writer knowledge approvals and receipts are owned by the authenticated server API.
+      match /memoryKnowledgeAnnotations/{annotationId} {
+        allow read, write: if false;
+      }
+      match /memoryKnowledgeDecisions/{operationId} {
+        allow read, write: if false;
+      }
+
       match /voiceContinuityDecisions/{decisionId} {
         function isOwnedDecision() {
           let data = resource.data;

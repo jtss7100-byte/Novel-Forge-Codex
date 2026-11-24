@@ -1,3 +1,10 @@
+
+import { createSceneMemoryRetriever } from '../server/sceneMemoryRetrieval';
+import { listMemoryKnowledge, listMemoryKnowledgeApprovals, listMemoryKnowledgeHistory, saveMemoryKnowledge, summarizeMemoryKnowledge } from '../server/memoryKnowledgeStore';
+import { indexMemoryInputOnServer, setCustomGeminiEmbedContentForTesting, type FirestoreRagManifestDoc } from '../server/ragEngine';
+import { computeDeterministicSemanticEmbedding, extractProjectMemoryIndexInputs } from '../services/memorySearchProvider';
+import type { Episode, Scene, TimelineEvent } from '../types/novel';
+import type { MemoryKnowledgeCommand, MemoryKnowledgeRow } from '../types/memoryKnowledge';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -3107,5 +3114,226 @@ test('Scene memory plan annotations persist under existing owner-only Firestore 
   } finally {
     await admin.db.recursiveDelete(admin.db.doc(path));
     await Promise.all([owner.cleanup(), other.cleanup(), admin.cleanup()]);
+  }
+});
+
+test('Phase 4.4A Stage 1.1 — verified knowledge through real Firebase Auth and Firestore Emulator', async (t) => {
+  const env = assertRulesEmulatorEnv();
+  const run = 'mk_' + Date.now();
+  const password = 'KnowledgeEmulator#227';
+  const email = (role: string) => `${run}-${role}@novelforge.local`;
+  const makeUser = (roleLabel: string) => createAndSignInEmulatorUser({
+    ...env, roleLabel, password, email: email(roleLabel), appName: `client_${roleLabel}_${run}`, adminAppName: `admin_${roleLabel}_${run}`,
+  });
+  const owner = await makeUser('owner');
+  const visitor = await makeUser('visitor');
+  const first = createIsolatedTestFirestoreClient({ ...env, runId: run });
+  const second = createIsolatedTestFirestoreClient({ ...env, runId: run + '_worker_two' });
+  const device = initializeClientApp(owner.app.options, run + '_device_two');
+  const base = `users/${owner.uid}/projects/knowledge`;
+  const projectId = 'knowledge';
+  const clock = '2026-01-01T00:00:00.000Z';
+  const scope = { ownerId: owner.uid, projectId };
+  const episode = { ...scope, id: 'ep300', episodeNumber: 300, title: '기록', synopsis: '', authorNote: '',
+    charCountWithSpaces: 0, charCountWithoutSpaces: 0, status: 'draft', canonStatus: 'DRAFT', content: '편집 중인 현재 원고',
+    latestRevisionId: 'rev300', linkedCharacterIds: ['seorin', 'dohyeon'], linkedWorldbuildingIds: [], createdAt: clock, updatedAt: clock } satisfies Episode;
+  const earlier = { ...episode, id: 'ep10', title: '먼 장면의 약속', content: '먼 장면에서 했던 서약을 꺼냈다.',
+    episodeNumber: 10, latestRevisionId: 'rev10', status: 'confirmed', canonStatus: 'CANON' } satisfies Episode;
+  const untouched = { ...earlier, id: 'ep30', title: '손의 부상', content: '모두가 본 손의 부상이 기록되었다.',
+    episodeNumber: 30, latestRevisionId: 'rev30' } satisfies Episode;
+  const learn: Scene = { ...scope, id: 'learn', episodeId: episode.id, sceneNumber: 2, title: '은빛 증표',
+    summary: '서린은 「은빛 증표가 북문 너머에 있다」라는 기록을 읽었다.', location: '북문', pointOfViewCharacterId: 'seorin',
+    eventIds: ['learn_event'], characterIds: ['seorin', 'dohyeon'], foreshadowingIds: [], canonStatus: 'CANON', sourceRevisionId: 'rev300',
+    createdAt: clock, updatedAt: clock };
+  const event: TimelineEvent = { ...scope, id: 'learn_event', title: '증표 지식 획득', summary: learn.summary, inUniverseDate: '',
+    chronologicalOrder: 30, episodeId: episode.id, sceneId: learn.id, participantCharacterIds: ['seorin', 'dohyeon'],
+    linkedForeshadowingIds: [], linkedWorldbuildingIds: [], canonStatus: 'CANON', sourceRevisionId: 'rev300',
+    createdBy: 'AUTHOR', createdAt: clock, updatedAt: clock };
+  const cutoff = { ...event, id: 'flashback', title: '증표를 읽기 전 회상', sceneId: '', chronologicalOrder: 10 };
+  const fixture = buildEvaluationFixture('NW8', 'offline');
+  const scenePlan = { ...fixture.plan.scenes[0], title: '은빛 증표를 찾는다', purpose: '서린이 북문에서 은빛 증표의 단서를 확인한다',
+    mustIncludeEvent: '증표 서약', characterIds: ['seorin', 'dohyeon'], pointOfViewCharacterId: 'seorin' };
+  const initial = { ...scenePlan, sceneNumber: 1 };
+  const later = { ...scenePlan, sceneNumber: 3 };
+  const flashback = { ...scenePlan, sceneNumber: 4, memory: { cutoffEventId: cutoff.id } };
+  const otherPov = { ...scenePlan, sceneNumber: 5, pointOfViewCharacterId: 'dohyeon' };
+  const plan = { ...fixture.plan, ...scope, id: 'plan', episodeId: episode.id, scenes: [initial, later, flashback, otherPov] };
+  const context = { ...fixture.context, ...scope, episodeId: episode.id, sceneCharacterIds: ['seorin', 'dohyeon'] };
+  const settings = { ...scope, context, plan, db: first.db, budget: { maxEmbeddingRequests: 0 } };
+  const list = () => listMemoryKnowledge(first.db, owner.uid, { projectId });
+  const approve = (commands: MemoryKnowledgeCommand[]) => saveMemoryKnowledge(first.db, owner.uid, { projectId, confirmed: true, commands });
+  const input = (row: MemoryKnowledgeRow, changes: Partial<MemoryKnowledgeCommand> = {}): MemoryKnowledgeCommand => {
+    assert.ok(row.source);
+    return { chunkId: row.chunkId, source: row.source, operationId: randomUUID(), expectedVersion: 0,
+      classification: 'PAST_EVENT', scope: 'PUBLIC', acquisition: [], ...changes };
+  };
+
+  try {
+    const auth = getClientAuth(device);
+    connectAuthEmulator(auth, `http://${env.authHost}`, { disableWarnings: true });
+    const active = getClientAuth(owner.app).currentUser;
+    assert.ok(active);
+    const followup = (await signInWithEmailAndPassword(auth, email('owner'), password)).user;
+    const [sessionOne, sessionTwo] = await Promise.all([
+      getAdminAuth(first.app).verifyIdToken(await active.getIdToken()),
+      getAdminAuth(second.app).verifyIdToken(await followup.getIdToken()),
+    ]);
+    assert.equal(sessionOne.uid, owner.uid);
+    assert.equal(sessionTwo.uid, owner.uid);
+
+    const batch = first.db.batch();
+    batch.set(first.db.doc(base), { id: projectId, ownerId: owner.uid, lifecycleStatus: 'ACTIVE' });
+    batch.set(first.db.doc(`${base}/writingPlans/${plan.id}`), plan);
+    batch.set(first.db.doc(`${base}/scenes/${learn.id}`), learn);
+    batch.set(first.db.doc(`${base}/timelineEvents/${event.id}`), event);
+    batch.set(first.db.doc(`${base}/timelineEvents/${cutoff.id}`), cutoff);
+    for (const row of [episode, earlier, untouched]) {
+      batch.set(first.db.doc(`${base}/episodes/${row.id}`), row);
+      batch.set(first.db.doc(`${base}/revisions/${row.latestRevisionId}`), {
+        ...scope, id: row.latestRevisionId, episodeId: row.id, content: row.content,
+      });
+    }
+    for (const id of ['seorin', 'dohyeon']) batch.set(first.db.doc(`${base}/characters/${id}`), { ...scope, id, name: id, canonStatus: 'CANON' });
+    await batch.commit();
+
+    setCustomGeminiEmbedContentForTesting(async ({ contents }) => ({
+      embeddings: [{ values: computeDeterministicSemanticEmbedding(contents, 768) }],
+    }));
+    for (const item of extractProjectMemoryIndexInputs({ ...scope, characters: [], worldbuilding: [], episodes: [episode, earlier, untouched], scenes: [learn], includeDrafts: true })) {
+      await indexMemoryInputOnServer(item, { db: first.db, cacheNamespace: run,
+        durableCommitPolicy: { requireDurableCloudCommit: true, requireActiveGenerationVerification: true } });
+    }
+    setCustomGeminiEmbedContentForTesting(null);
+
+    const currentPath = `${base}/episodes/${episode.id}`;
+    const canonPath = `${base}/scenes/${learn.id}`;
+    const preservedBefore = await first.db.getAll(first.db.doc(currentPath), first.db.doc(canonPath), first.db.doc(`${base}/ragManifest/control`));
+    const records = await list();
+    const rows = new Map(records.rows.map((row) => [row.sourceEntityId, row]));
+    const sceneRow = rows.get(learn.id)!;
+    const oldRow = rows.get(earlier.id)!;
+    const quietRow = rows.get(untouched.id)!;
+    assert.ok(sceneRow?.source && oldRow?.source && quietRow?.source, JSON.stringify(records.rows));
+    const getWriter = (at = later, admin = first.db) => createSceneMemoryRetriever({ ...settings, db: admin })(at);
+    let grant: MemoryKnowledgeCommand;
+    let annotationId = '';
+
+    await t.test('MK1–MK5: bounded legacy inventory, exact quotation candidate, scoped Preview, and no unapproved Writer access', async () => {
+      assert.equal(records.rows.filter((row) => row.status === 'UNANNOTATED').length, 3);
+      assert.equal(records.rows.find((row) => row.sourceEntityId === episode.id)?.status, 'SOURCE_UNVERIFIED');
+      assert.equal(records.totalDocuments, 4);
+      assert.equal(records.activeDocuments, 4);
+      assert.equal(sceneRow.candidateReason, 'DIRECT_QUOTE_REVIEW');
+      assert.equal(sceneRow.candidateScope, 'UNKNOWN');
+      assert.equal((await getWriter()).evidence.length, 0);
+      const summary = await summarizeMemoryKnowledge(first.db, owner.uid, { projectId });
+      assert.equal(summary.tally.reviewedDocuments, 2);
+      const next = await summarizeMemoryKnowledge(first.db, owner.uid, { projectId, after: summary.next });
+      assert.equal(summary.tally.unannotatedDocuments + next.tally.unannotatedDocuments, 3);
+      assert.equal(summary.rows.length + next.rows.length, 0);
+    });
+
+    await t.test('MK6–MK11: real multi-worker CAS, receipt replay, scope isolation, token-verified restoration, client forgery denied', async () => {
+      const draft = input(sceneRow, { scope: 'CHARACTERS', acquisition: [{
+        characterId: 'seorin', method: 'DOCUMENT', episodeId: episode.id, sceneId: learn.id, eventId: event.id,
+      }] });
+      const alternate = { ...draft, operationId: randomUUID() };
+      const results = await Promise.all([
+        approve([draft]), saveMemoryKnowledge(second.db, sessionTwo.uid, { projectId, confirmed: true, commands: [alternate] }),
+      ]);
+      const [a, b] = results.map((entry) => entry.results[0]);
+      assert.equal(Number(a.ok) + Number(b.ok), 1, JSON.stringify(results));
+      grant = a.ok ? draft : alternate;
+      const winner = a.ok ? a : b;
+      assert.ok(winner.ok);
+      assert.equal((a.ok ? b : a).ok, false);
+      assert.ok(results.some((result) => result.results.some((row) => !row.ok && row.code === 'VERSION_CONFLICT')));
+      annotationId = winner.record.id;
+      assert.deepEqual(await approve([grant]), { results: [winner] });
+      assert.deepEqual((await approve([{ ...grant, classification: 'CURRENT_VALID_STATE' }])).results,
+        [{ operationId: grant.operationId, ok: false, code: 'OPERATION_CONFLICT' }]);
+      assert.equal((await listMemoryKnowledge(second.db, sessionTwo.uid, { projectId })).rows.find((row) => row.annotationId === annotationId)?.annotation?.version, 1);
+      await assert.rejects(listMemoryKnowledge(first.db, visitor.uid, { projectId }), { code: 'FORBIDDEN' });
+      await assert.rejects(listMemoryKnowledge(first.db, owner.uid, { projectId: 'different' }), { code: 'FORBIDDEN' });
+      const ref = `${base}/memoryKnowledgeAnnotations/${annotationId}`;
+      const secondClient = connectClientFirestoreDb({ app: device, ...env });
+      await assertPermissionDenied(() => getDoc(doc(secondClient, ref)), 'Direct client approval read');
+      await assertPermissionDenied(() => setDoc(doc(owner.db, ref), { scope: 'PUBLIC' }), 'Direct client approval forgery');
+      await assertPermissionDenied(() => setDoc(doc(owner.db, `${base}/memoryKnowledgeDecisions/fake`), { scope: 'PUBLIC' }), 'Direct client receipt forgery');
+      const admitted = await getWriter(later, second.db);
+      assert.equal(admitted.evidence[0]?.sourceEntityId, learn.id, JSON.stringify(admitted.diagnostics));
+      const prompt = assembleNovelWriterPromptInOrder({
+        context: { ...context, retrievedMemoryChunks: admitted.evidence }, scenePlan: later, totalScenesInPlan: plan.scenes.length,
+      });
+      assert.ok(prompt.orderedPrompt.includes(learn.summary));
+    });
+
+    await t.test('MK16–MK20: acquired scene knowledge is later-only, POV-specific, and flashback-safe', async () => {
+      for (const [scene, reason] of [[initial, 'FUTURE_INFORMATION'], [flashback, 'FUTURE_INFORMATION'], [otherPov, 'POV_KNOWLEDGE_RESTRICTED']] as const) {
+        const result = await getWriter(scene);
+        assert.ok(!result.evidence.some((item) => item.sourceEntityId === learn.id), JSON.stringify(result.diagnostics));
+        assert.ok(result.diagnostics.rejected.some((item) => item.reason === reason), JSON.stringify(result.diagnostics));
+      }
+      const preview = await listMemoryKnowledge(first.db, owner.uid, { projectId, characterId: 'seorin',
+        targetEpisodeId: episode.id, targetSceneNumber: 3, sourceEntityId: learn.id });
+      assert.equal(preview.rows[0].knownAtTarget, true);
+      const before = await listMemoryKnowledge(first.db, owner.uid, { projectId, characterId: 'seorin',
+        targetEpisodeId: episode.id, targetSceneNumber: 1, sourceEntityId: learn.id });
+      assert.equal(before.rows[0].knownAtTarget, false);
+    });
+
+    await t.test('MK13, MK21–MK23: selected-only partial bulk failure, accurate replay and stable originals', async () => {
+      const newVersion = { ...grant, expectedVersion: 1, operationId: randomUUID() };
+      const forged = input(oldRow, { source: { ...oldRow.source!, sourceContentHash: 'a'.repeat(64) } });
+      const partial = await approve([newVersion, forged]);
+      assert.equal(partial.results[0].ok, true, JSON.stringify(partial));
+      assert.deepEqual(partial.results[1], { operationId: forged.operationId, ok: false, code: 'STALE_SOURCE' });
+      assert.deepEqual(await approve([newVersion]), { results: [partial.results[0]] });
+      const history = await listMemoryKnowledgeHistory(first.db, owner.uid, { projectId, annotationId });
+      const version = history.entries.find((entry) => entry.record.version === 2);
+      assert.equal(version?.previous?.version, 1);
+      assert.equal((await list()).rows.find((row) => row.chunkId === quietRow.chunkId)?.status, 'UNANNOTATED');
+      const current = await first.db.getAll(...preservedBefore.map((snap) => snap.ref));
+      assert.deepEqual(current.map((snap) => snap.data()), preservedBefore.map((snap) => snap.data()));
+    });
+
+    await t.test('MK12, MK14 and MK15: exact approval survives a new physical ID, then stops after Revision and generation change', async () => {
+      const manifestRef = first.db.doc(`${base}/ragManifest/control`);
+      const memoryDoc = first.db.doc(`${base}/memoryDocuments/${sceneRow.documentId}`);
+      const oldChunk = first.db.doc(`${base}/memoryChunks/${sceneRow.chunkId}`);
+      const [manifestSnap, docSnap, chunkSnap] = await first.db.getAll(manifestRef, memoryDoc, oldChunk);
+      const manifest = manifestSnap.data() as FirestoreRagManifestDoc;
+      const key = `${owner.uid}:${projectId}:SCENE:${learn.id}`;
+      const previousState = manifest.entityStates![key];
+      const oldGeneration = previousState.activeGeneration;
+      const next = manifest.activeGenerationCounter + 1;
+      const physicalDocument = 'new_physical_doc';
+      const physicalChunk = 'new_physical_chunk';
+      const reindex = first.db.batch();
+      reindex.set(first.db.doc(`${base}/memoryDocuments/${physicalDocument}`),
+        { ...docSnap.data(), id: physicalDocument, documentId: physicalDocument, indexGeneration: next });
+      reindex.set(first.db.doc(`${base}/memoryChunks/${physicalChunk}`),
+        { ...chunkSnap.data(), id: physicalChunk, chunkId: physicalChunk, documentId: physicalDocument, indexGeneration: next });
+      reindex.set(manifestRef, { ...manifest, activeGenerationCounter: next,
+        entityStates: { ...manifest.entityStates, [key]: { ...previousState, activeGeneration: next, activeDocumentIds: [physicalDocument] } },
+        retiredGenerationsByEntity: { ...manifest.retiredGenerationsByEntity, [key]: { retiredThroughGen: oldGeneration, retiredGens: [oldGeneration] } },
+      });
+      await reindex.commit();
+      const restored = await getWriter();
+      assert.deepEqual(restored.evidence.map((item) => item.chunkId), [physicalChunk], JSON.stringify(restored.diagnostics));
+      assert.equal((await listMemoryKnowledgeApprovals(second.db, sessionTwo.uid, { projectId })).entries[0]?.status, 'ANNOTATED');
+      const oldApproval = await approve([{ ...grant, expectedVersion: 2, operationId: randomUUID() }]);
+      assert.equal(oldApproval.results[0].ok, false);
+      await first.db.doc(canonPath).update({ sourceRevisionId: 'rev_new', summary: '변경된 확정 단서' });
+      await first.db.doc(`${base}/revisions/rev_new`).set({ ...scope, id: 'rev_new', episodeId: episode.id, content: '새 승인 근거' });
+      assert.equal((await getWriter()).evidence.length, 0);
+      const archive = await listMemoryKnowledgeApprovals(second.db, sessionTwo.uid, { projectId });
+      assert.equal(archive.entries.find((entry) => entry.record.id === annotationId)?.status, 'STALE_ANNOTATION');
+      assert.equal((await first.db.doc(currentPath).get()).data()?.content, episode.content);
+    });
+  } finally {
+    setCustomGeminiEmbedContentForTesting(null);
+    await first.db.recursiveDelete(first.db.doc(base));
+    await Promise.all([owner.cleanup(), visitor.cleanup(), first.cleanup(), second.cleanup(), deleteClientApp(device)]);
   }
 });

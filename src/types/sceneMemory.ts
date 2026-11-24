@@ -51,6 +51,7 @@ export interface MemoryRetrievalBudget {
 export type MemoryRejectionReason =
   | 'STALE_SOURCE' | 'SOURCE_UNVERIFIED' | 'NON_CANON' | 'CROSS_PROJECT' | 'RETIRED_GENERATION'
   | 'DELETED_SOURCE' | 'FUTURE_INFORMATION' | 'POV_KNOWLEDGE_RESTRICTED'
+  | 'STALE_ANNOTATION' | 'KNOWLEDGE_SCOPE_CONFLICT' | 'TEMPORAL_EVIDENCE_MISSING'
   | 'DUPLICATE_EVIDENCE' | 'BUDGET_EXCEEDED' | 'LOW_RELEVANCE';
 export type MemoryTemporalStatus = 'PAST_EVENT' | 'CURRENT_VALID_STATE' | 'SUPERSEDED_HISTORICAL_STATE';
 export type MemoryKnowledgeEligibility = 'PUBLIC' | 'POV_CHARACTER_KNOWLEDGE' | 'AUTHOR_KNOWLEDGE' | 'UNKNOWN_KNOWLEDGE_SCOPE';
@@ -70,6 +71,7 @@ export interface SceneMemorySelection {
   semanticScore: number;
   keywordScore: number;
   retrievalSource?: string;
+  annotationVersion?: number;
 }
 
 export interface SceneMemoryDiagnostics {

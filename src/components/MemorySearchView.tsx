@@ -1,3 +1,5 @@
+import { MemoryKnowledgePanel } from './MemoryKnowledgePanel';
+import type { Scene } from '../types/novel';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Search,
@@ -48,6 +50,7 @@ interface MemorySearchViewProps {
   characters: Character[];
   worldbuilding: WorldbuildingItem[];
   timelineEvents: TimelineEvent[];
+  scenes?: Scene[];
   foreshadowings: Foreshadowing[];
   relationships?: CharacterRelationship[];
   onNavigateToSource: (params: {
@@ -107,6 +110,7 @@ export const MemorySearchView: React.FC<MemorySearchViewProps> = ({
   characters,
   worldbuilding,
   timelineEvents,
+  scenes = [],
   foreshadowings,
   relationships = [],
   onNavigateToSource,
@@ -615,6 +619,8 @@ export const MemorySearchView: React.FC<MemorySearchViewProps> = ({
 
   return (
     <div className="space-y-6" data-testid="memory-search-view">
+      {idToken && <MemoryKnowledgePanel key={activeProject.id} projectId={activeProject.id} token={idToken}
+        characters={characters} episodes={episodes} scenes={scenes} events={timelineEvents} />}
       {/* Header & Index Status Banner */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 shadow-lg">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
